@@ -148,6 +148,10 @@ pub struct StatusResult {
     /// system package manager): it updates hc, `hc update` won't.
     /// Null for a replaceable plain install.
     pub installed_by: Option<String>,
+    /// Execs running now and the most allowed at once (`machine.exec` beyond that is refused as unavailable).
+    pub execs_running: usize,
+    pub execs_max: usize,
+    pub execs_free: usize,
 }
 
 #[derive(Deserialize, JsonSchema)]
