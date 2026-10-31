@@ -220,12 +220,12 @@ impl Core {
         WRITES.ready.notify_one();
     }
 
-    /// Written before it returns, for a restart or stop that reads it next.
-    pub fn save_now(&self, st: &State) {
+    /// Written before it returns, for a restart or stop that reads it next; `sync` waits for the disk too.
+    pub fn save_now(&self, st: &State, sync: bool) {
         self.dirty.store(false, std::sync::atomic::Ordering::SeqCst);
         let bytes = serde_json::to_vec(&st.reg).expect("registry serializes");
         let generation = WRITES.next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        write_newest(generation, &self.paths.state.join("terminals.json"), &bytes);
+        write_newest(generation, &self.paths.state.join("terminals.json"), &bytes, sync);
     }
 
     /// For frequent changes a crash may lose (the next start rebuilds them):
@@ -776,10 +776,10 @@ impl Core {
                 relay.flush(screen);
             }
             if let Some(snapshot) = screen.snapshot() {
-                let _ = write_atomic(&self.snapshot_path(*id), &snapshot);
+                let _ = crate::paths::write_replace(&self.snapshot_path(*id), &snapshot);
             }
         }
-        self.save_now(&st);
+        self.save_now(&st, false);
     }
 
     /// Server stop: end every program, then let the holder exit.
@@ -799,7 +799,7 @@ impl Core {
         for id in live {
             self.record_finish(&mut st, id, Exit { code: None, signal: None }, "server_stop");
         }
-        self.save_now(&st);
+        self.save_now(&st, true);
     }
 }
 
@@ -815,12 +815,13 @@ static WRITES: Writes =
     Writes { pending: Mutex::new(None), ready: Condvar::new(), written: Mutex::new(0), next: AtomicU64::new(1) };
 
 /// Writes unless a newer generation is already on disk, so a late older write never replaces a newer one.
-fn write_newest(generation: u64, path: &Path, bytes: &[u8]) {
+fn write_newest(generation: u64, path: &Path, bytes: &[u8], sync: bool) {
     let mut written = WRITES.written.lock().unwrap_or_else(|p| p.into_inner());
     if generation <= *written {
         return;
     }
-    match write_atomic(path, bytes) {
+    let wrote = if sync { write_atomic(path, bytes) } else { crate::paths::write_replace(path, bytes) };
+    match wrote {
         Ok(()) => *written = generation,
         Err(e) => eprintln!("core: cannot save terminals: {e}"),
     }
@@ -837,7 +838,7 @@ fn writer() {
                 pending = WRITES.ready.wait(pending).unwrap_or_else(|p| p.into_inner());
             }
         };
-        write_newest(generation, &path, &bytes);
+        write_newest(generation, &path, &bytes, true);
     }
 }
 

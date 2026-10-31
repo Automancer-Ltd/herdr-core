@@ -74,6 +74,14 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     std::fs::rename(tmp, path)
 }
 
+/// `write_atomic` without the disk sync: for a handover, whose next core reads the file at once from the same
+/// machine's cache. Under disk pressure each sync took seconds while no core answered (Automancer, 31 Oct 2026).
+pub fn write_replace(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(tmp, path)
+}
+
 /// Hex digits in a holder's socket name.
 pub const HOLDER_ID: usize = 8;
 
