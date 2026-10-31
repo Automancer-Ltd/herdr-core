@@ -144,6 +144,10 @@ pub struct StatusResult {
     /// The package manager this hc came from (homebrew, nix, mise): it
     /// updates hc, `hc update` won't. Null for a plain install.
     pub installed_by: Option<String>,
+    /// Execs running now and the most allowed at once (`machine.exec` beyond that is refused as unavailable).
+    pub execs_running: usize,
+    pub execs_max: usize,
+    pub execs_free: usize,
 }
 
 #[derive(Deserialize, JsonSchema)]

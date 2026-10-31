@@ -211,6 +211,9 @@ async fn server_status(core: Ctx<'_>, _: Empty) -> Result<StatusResult, RpcError
         live,
         finished: st.reg.terminals.len() - live,
         installed_by: crate::client::installed_by().map(String::from),
+        execs_running: crate::exec::running(),
+        execs_max: crate::exec::max_running(),
+        execs_free: crate::exec::max_running().saturating_sub(crate::exec::running()),
     })
 }
 
