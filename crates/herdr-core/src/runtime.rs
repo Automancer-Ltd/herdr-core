@@ -12,8 +12,9 @@ use crate::viewers::Viewer;
 use ghostty_vt::Terminal as Screen;
 use std::collections::{HashMap, HashSet};
 use std::io;
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex, MutexGuard, mpsc};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicU64;
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, mpsc};
 use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::{Notify, oneshot};
 
@@ -204,12 +205,27 @@ impl Core {
         self.paths.state.join("screens").join(format!("{}.snap", crate::terminals::address(id)))
     }
 
+    /// Queues the registry for the background writer: callers hold the lock, and an fsync on a stalled disk took
+    /// seconds with every RPC waiting behind it (Automancer, 31 Oct 2026). The newest registry wins.
     pub fn save(&self, st: &State) {
         self.dirty.store(false, std::sync::atomic::Ordering::SeqCst);
         let bytes = serde_json::to_vec(&st.reg).expect("registry serializes");
-        if let Err(e) = write_atomic(&self.paths.state.join("terminals.json"), &bytes) {
-            eprintln!("core: cannot save terminals: {e}");
-        }
+        static START: std::sync::Once = std::sync::Once::new();
+        START.call_once(|| {
+            std::thread::Builder::new().name("hc-save".into()).spawn(writer).expect("save thread starts");
+        });
+        let generation = WRITES.next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        *WRITES.pending.lock().unwrap_or_else(|p| p.into_inner()) =
+            Some((generation, self.paths.state.join("terminals.json"), bytes));
+        WRITES.ready.notify_one();
+    }
+
+    /// Written before it returns, for a restart or stop that reads it next.
+    pub fn save_now(&self, st: &State) {
+        self.dirty.store(false, std::sync::atomic::Ordering::SeqCst);
+        let bytes = serde_json::to_vec(&st.reg).expect("registry serializes");
+        let generation = WRITES.next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        write_newest(generation, &self.paths.state.join("terminals.json"), &bytes);
     }
 
     /// For frequent changes a crash may lose (the next start rebuilds them):
@@ -763,7 +779,7 @@ impl Core {
                 let _ = write_atomic(&self.snapshot_path(*id), &snapshot);
             }
         }
-        self.save(&st);
+        self.save_now(&st);
     }
 
     /// Server stop: end every program, then let the holder exit.
@@ -783,7 +799,45 @@ impl Core {
         for id in live {
             self.record_finish(&mut st, id, Exit { code: None, signal: None }, "server_stop");
         }
-        self.save(&st);
+        self.save_now(&st);
+    }
+}
+
+/// The registry writes waiting for the `hc-save` thread, and the newest generation on disk.
+struct Writes {
+    pending: Mutex<Option<(u64, PathBuf, Vec<u8>)>>,
+    ready: Condvar,
+    written: Mutex<u64>,
+    next: AtomicU64,
+}
+
+static WRITES: Writes =
+    Writes { pending: Mutex::new(None), ready: Condvar::new(), written: Mutex::new(0), next: AtomicU64::new(1) };
+
+/// Writes unless a newer generation is already on disk, so a late older write never replaces a newer one.
+fn write_newest(generation: u64, path: &Path, bytes: &[u8]) {
+    let mut written = WRITES.written.lock().unwrap_or_else(|p| p.into_inner());
+    if generation <= *written {
+        return;
+    }
+    match write_atomic(path, bytes) {
+        Ok(()) => *written = generation,
+        Err(e) => eprintln!("core: cannot save terminals: {e}"),
+    }
+}
+
+fn writer() {
+    loop {
+        let (generation, path, bytes) = {
+            let mut pending = WRITES.pending.lock().unwrap_or_else(|p| p.into_inner());
+            loop {
+                if let Some(next) = pending.take() {
+                    break next;
+                }
+                pending = WRITES.ready.wait(pending).unwrap_or_else(|p| p.into_inner());
+            }
+        };
+        write_newest(generation, &path, &bytes);
     }
 }
 
