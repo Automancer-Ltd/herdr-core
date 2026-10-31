@@ -16,7 +16,30 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 type Reader = BufReader<platform::AsyncRead>;
 type Writer = platform::AsyncWrite;
 
+/// Every exec and terminal holds a few descriptors; the usual soft limit of 1024 stops the
+/// core near 250 of them while the hard limit allows far more. Raise soft to hard.
+#[cfg(unix)]
+fn raise_open_files() {
+    // SAFETY: getrlimit/setrlimit only read and write the struct passed in.
+    unsafe {
+        let mut lim: libc::rlimit = std::mem::zeroed();
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) == 0 && lim.rlim_cur < lim.rlim_max {
+            let want = lim.rlim_max;
+            lim.rlim_cur = want;
+            // macOS refuses more than OPEN_MAX when the hard limit is unlimited.
+            if libc::setrlimit(libc::RLIMIT_NOFILE, &lim) != 0 && cfg!(target_os = "macos") {
+                lim.rlim_cur = want.min(10240);
+                libc::setrlimit(libc::RLIMIT_NOFILE, &lim);
+            }
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn raise_open_files() {}
+
 pub fn serve() -> io::Result<()> {
+    raise_open_files();
     let paths = Paths::from_env().map_err(|e| io::Error::other(e.message))?;
     paths.create_dirs()?;
     let mut lock =
