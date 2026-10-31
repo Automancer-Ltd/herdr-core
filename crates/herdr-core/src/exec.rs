@@ -20,8 +20,8 @@ pub const MAX_STDIN: usize = 8 << 20;
 pub const DEFAULT_TIMEOUT: f64 = 60.0;
 const MAX_TIMEOUT: f64 = 600.0;
 /// Execs allowed at once; `HC_MAX_EXECS` in the server's environment overrides it (Automancer: upstream's 16 refused
-/// a burst of lane starts on a 20-core machine, 31 Oct 2026).
-const DEFAULT_MAX_RUNNING: usize = 256;
+/// a burst of lane starts on a 20-core machine, 31 Oct 2026). 1024 ran at once on auto-vps under load without a failure.
+const DEFAULT_MAX_RUNNING: usize = 1024;
 
 pub fn max_running() -> usize {
     static MAX: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
