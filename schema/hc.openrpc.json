@@ -956,6 +956,22 @@
           "core": {
             "$ref": "#/components/schemas/CoreInfo"
           },
+          "execs_free": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "execs_max": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "execs_running": {
+            "description": "Execs running now and the most allowed at once (`machine.exec` beyond that is refused as unavailable).",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
           "finished": {
             "format": "uint",
             "minimum": 0,
@@ -1012,7 +1028,10 @@
           "uptime_ms",
           "holders",
           "live",
-          "finished"
+          "finished",
+          "execs_running",
+          "execs_max",
+          "execs_free"
         ],
         "type": "object"
       },

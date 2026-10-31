@@ -117,7 +117,10 @@ fn recovery_saves_only_client_overrides_and_refreshes_the_core_environment() {
         }),
     );
     let t = started["result"]["address"].as_str().unwrap();
-    let state = std::fs::read_to_string(s.root.join("state/herdr-core/test/terminals.json")).unwrap();
+    // Saved off the core lock, shortly after the call returns.
+    let path = s.root.join("state/herdr-core/test/terminals.json");
+    wait_until("terminals.json saved", || std::fs::read_to_string(&path).is_ok_and(|f| f.contains("HC_KEEP_OVERRIDE")));
+    let state = std::fs::read_to_string(&path).unwrap();
     assert!(!state.contains("HC_KEEP_BASE") && !state.contains("old-secret"), "{state}");
     let state: serde_json::Value = serde_json::from_str(&state).unwrap();
     assert_eq!(
