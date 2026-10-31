@@ -26,7 +26,11 @@ const DEFAULT_MAX_RUNNING: usize = 256;
 pub fn max_running() -> usize {
     static MAX: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *MAX.get_or_init(|| {
-        std::env::var("HC_MAX_EXECS").ok().and_then(|v| v.parse().ok()).filter(|&n| n > 0).unwrap_or(DEFAULT_MAX_RUNNING)
+        std::env::var("HC_MAX_EXECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(DEFAULT_MAX_RUNNING)
     })
 }
 
