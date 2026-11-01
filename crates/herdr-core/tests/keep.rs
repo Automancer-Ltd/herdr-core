@@ -64,6 +64,7 @@ fn kept_terminal_survives_core_crash_and_recovers_if_its_holder_is_also_lost() {
     let s = Session::new();
     let t = run(&s, &["--keep", "sleep", "100"]);
     let old = get(&s, &t)["pid"].as_i64().unwrap();
+    s.wait_saved_terminal(old);
     let status = s.json(&["server", "status"]);
     unsafe {
         libc::kill(status["pid"].as_i64().unwrap() as i32, libc::SIGKILL);

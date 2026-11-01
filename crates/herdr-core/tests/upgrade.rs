@@ -49,6 +49,8 @@ fn a_materialized_or_replaced_executable_can_start_its_first_holder() {
         assert_eq!(status["pid"], pid, "the running core did not need a restart");
         assert_eq!(status["holder"]["current"], true);
 
+        s.wait_saved_terminal(get(&s, &t)["pid"].as_i64().unwrap());
+
         unsafe { libc::kill(pid.as_i64().unwrap() as i32, libc::SIGKILL) };
         wait_until("the isolated core exited", || !pid_alive(pid.as_i64().unwrap()));
         // Only the holder may restart it: no CLI autostart during this wait.
