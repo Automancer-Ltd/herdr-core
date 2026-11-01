@@ -47,8 +47,8 @@ fn a_new_holder_of_another_build_reports_both_identities() {
     assert!(err.contains(&crate::client::build_id()), "{err}");
     assert!(core.lock().holders.is_empty());
     fake.join().unwrap();
+    core.handover(); // finish the registry write before removing its directory
     drop(core);
-    crate::paths::flush_later(); // the hc-files thread may still be writing into it
     std::fs::remove_dir_all(root).unwrap();
 }
 
