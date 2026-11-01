@@ -48,6 +48,7 @@ fn a_new_holder_of_another_build_reports_both_identities() {
     assert!(core.lock().holders.is_empty());
     fake.join().unwrap();
     drop(core);
+    crate::paths::flush_later(); // the hc-files thread may still be writing into it
     std::fs::remove_dir_all(root).unwrap();
 }
 
