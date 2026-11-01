@@ -83,6 +83,7 @@ async fn waiting_for_holder_start_does_not_block_the_core_executor() {
     blocker.join().unwrap();
     assert!(start.await.unwrap().is_err());
     drop(core);
+    crate::paths::flush_later(); // the hc-files thread may still be writing into it
     std::fs::remove_dir_all(root).unwrap();
     assert!(answered_while_starting, "holder startup blocked the core executor");
 }

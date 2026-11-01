@@ -237,6 +237,8 @@ fn a_client_that_stops_reading_its_replies_is_disconnected_not_kept_in_memory() 
     let s = Session::new();
     s.json(&["server", "start"]);
     let mut stream = std::os::unix::net::UnixStream::connect(s.socket()).unwrap();
+    // Before the hangup: macOS refuses SO_RCVTIMEO (EINVAL) on a socket its peer closed.
+    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     writeln!(stream, r#"{{"jsonrpc":"2.0","id":0,"method":"hello","params":{{"framed":true}}}}"#).unwrap();
     for id in 1..=8 {
         let call = json!({"jsonrpc": "2.0", "id": id, "method": "machine.exec",
@@ -246,17 +248,14 @@ fn a_client_that_stops_reading_its_replies_is_disconnected_not_kept_in_memory() 
     // 8 replies of ~11 MB, none read: past the cap it hangs up on us.
     // Wait for the hangup without consuming bytes. Draining after a fixed sleep
     // can let a loaded core keep up before its reply queue ever reaches the cap.
-    let mut fd = libc::pollfd { fd: stream.as_raw_fd(), events: 0, revents: 0 };
-    loop {
-        let ready = unsafe { libc::poll(&mut fd, 1, 20_000) };
-        if ready < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
-            continue;
-        }
-        assert_eq!(ready, 1, "the unread connection must be disconnected before we drain it");
-        assert_ne!(fd.revents & libc::POLLHUP, 0, "the server hung up: {:#x}", fd.revents);
-        break;
-    }
-    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    // Ask again each time rather than blocking in one poll: macOS arms a
+    // one-shot watch that the replies already waiting use up, so a hangup
+    // after that never wakes a poll that is already blocked.
+    wait_until_for("the unread connection is disconnected before we drain it", Duration::from_secs(20), || {
+        let mut fd = libc::pollfd { fd: stream.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+        assert!(unsafe { libc::poll(&mut fd, 1, 0) } >= 0);
+        fd.revents & libc::POLLHUP != 0
+    });
     let mut got = Vec::new();
     stream.read_to_end(&mut got).expect("hung up on, not left waiting");
     assert!(got.len() < 64 << 20, "only what was in flight came");
