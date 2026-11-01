@@ -64,11 +64,16 @@ impl Session {
     /// Crash tests recover persisted terminals; let the off-lock writer save
     /// their setup before killing the core that owns it.
     pub fn wait_saved_terminal(&self, pid: i64) {
+        self.wait_saved(|t| t["pid"] == pid);
+    }
+
+    /// Waits until terminals.json on disk holds a terminal record matching `want`.
+    pub fn wait_saved(&self, want: impl Fn(&Value) -> bool) {
         let path = self.root.join("state/herdr-core/test/terminals.json");
         wait_until("terminal saved before simulated crash", || {
             std::fs::read(&path).is_ok_and(|bytes| {
                 serde_json::from_slice::<Value>(&bytes).is_ok_and(|saved| {
-                    saved["terminals"].as_object().is_some_and(|ts| ts.values().any(|t| t["pid"] == pid))
+                    saved["terminals"].as_object().is_some_and(|ts| ts.values().any(&want))
                 })
             })
         });
