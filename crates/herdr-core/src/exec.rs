@@ -165,8 +165,10 @@ pub async fn run(core: &Arc<Core>, p: ExecParams, from_afar: bool) -> Result<Exe
     let token = crate::sweep::token();
     let dir = tokens_dir(&core.paths.state);
     let file = dir.join(&token);
-    std::fs::create_dir_all(&dir)
-        .and_then(|()| std::fs::write(&file, b""))
+    let (d, f) = (dir.clone(), file.clone());
+    tokio::task::spawn_blocking(move || std::fs::create_dir_all(&d).and_then(|()| std::fs::write(&f, b"")))
+        .await
+        .map_err(|e| RpcError::internal(e.to_string()))?
         .map_err(|e| RpcError::internal(format!("cannot note the exec: {e}")))?;
     let mut cmd = tokio::process::Command::new(&argv[0]);
     #[cfg(windows)]

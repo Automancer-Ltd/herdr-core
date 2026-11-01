@@ -82,6 +82,70 @@ pub fn write_replace(path: &Path, bytes: &[u8]) -> io::Result<()> {
     std::fs::rename(tmp, path)
 }
 
+/// State files the core thread hands off: the newest bytes per path (`None` removes it), written by `hc-files`.
+/// The core runs every call on one thread, so a disk sync there stopped every machine's calls for up to 24 s
+/// while the disk was busy (Automancer, 1 Nov 2026).
+static LATER: std::sync::Mutex<Option<std::collections::HashMap<PathBuf, Option<Vec<u8>>>>> =
+    std::sync::Mutex::new(None);
+static LATER_READY: std::sync::Condvar = std::sync::Condvar::new();
+
+/// Writes (atomically, synced) or removes `path` off the calling thread; a newer call for the same path wins.
+pub fn later(path: PathBuf, bytes: Option<Vec<u8>>) {
+    static START: std::sync::Once = std::sync::Once::new();
+    START.call_once(|| {
+        std::thread::Builder::new().name("hc-files".into()).spawn(files_writer).expect("files thread starts");
+    });
+    LATER.lock().unwrap_or_else(|p| p.into_inner()).get_or_insert_default().insert(path, bytes);
+    LATER_READY.notify_one();
+}
+
+/// What `later` has not written yet for `path`: `Some(None)` means it is being removed.
+pub fn pending(path: &Path) -> Option<Option<Vec<u8>>> {
+    LATER.lock().unwrap_or_else(|p| p.into_inner()).as_ref()?.get(path).cloned()
+}
+
+/// Waits (up to 10 s) for `later`'s queue to reach the disk: before a restart or stop, whose next core reads it.
+pub fn flush_later() {
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while LATER.lock().unwrap_or_else(|p| p.into_inner()).as_ref().is_some_and(|m| !m.is_empty())
+        && std::time::Instant::now() < until
+    {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+fn files_writer() {
+    loop {
+        let (path, bytes) = {
+            let mut q = LATER.lock().unwrap_or_else(|p| p.into_inner());
+            loop {
+                if let Some(path) = q.as_ref().and_then(|m| m.keys().next().cloned()) {
+                    let bytes = q.as_ref().and_then(|m| m.get(&path).cloned()).flatten();
+                    break (path, bytes);
+                }
+                q = LATER_READY.wait(q).unwrap_or_else(|p| p.into_inner());
+            }
+        };
+        let done = match &bytes {
+            Some(b) => write_atomic(&path, b),
+            None if path.is_dir() => std::fs::remove_dir_all(&path),
+            None => std::fs::remove_file(&path),
+        };
+        if let Err(e) = done
+            && (bytes.is_some() || e.kind() != io::ErrorKind::NotFound)
+        {
+            eprintln!("core: cannot save {}: {e}", path.display());
+        }
+        // Done unless a newer write for the path arrived meanwhile.
+        let mut q = LATER.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(m) = q.as_mut()
+            && m.get(&path) == Some(&bytes)
+        {
+            m.remove(&path);
+        }
+    }
+}
+
 /// Hex digits in a holder's socket name.
 pub const HOLDER_ID: usize = 8;
 

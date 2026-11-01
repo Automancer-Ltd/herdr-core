@@ -620,10 +620,8 @@ impl Core {
             relay.flush(screen);
         }
         st.relays.remove(&id);
-        if let Some(snapshot) = st.screens.remove(&id).and_then(|s| s.snapshot())
-            && let Err(e) = write_atomic(&self.snapshot_path(id), &snapshot)
-        {
-            eprintln!("core: cannot save screen of {}: {e}", crate::terminals::address(id));
+        if let Some(snapshot) = st.screens.remove(&id).and_then(|s| s.snapshot()) {
+            crate::paths::later(self.snapshot_path(id), Some(snapshot));
         }
         // `--rm`: gone now, unless its parent is waiting for the exit code.
         let rm = st.reg.terminals.get(&id).is_some_and(|t| {
@@ -647,8 +645,8 @@ impl Core {
     pub fn screen_text(&self, st: &State, id: u32) -> Option<String> {
         match st.screens.get(&id) {
             Some(screen) => Some(screen.plain_text()),
-            None => std::fs::read(self.snapshot_path(id))
-                .ok()
+            None => crate::paths::pending(&self.snapshot_path(id))
+                .unwrap_or_else(|| std::fs::read(self.snapshot_path(id)).ok())
                 .and_then(|bytes| Screen::restore(&bytes, self.history_bytes()))
                 .map(|s| s.plain_text()),
         }
@@ -659,8 +657,8 @@ impl Core {
         // fell behind must not bring it back.
         let Some(was) = st.reg.terminals.remove(&id) else { return };
         self.emit_from(st, "removed", id, serde_json::json!({}), Some(&was));
-        let _ = std::fs::remove_file(self.snapshot_path(id));
-        let _ = std::fs::remove_dir_all(crate::put::dir(&self.paths.state, id));
+        crate::paths::later(self.snapshot_path(id), None);
+        crate::paths::later(crate::put::dir(&self.paths.state, id), None);
         self.save(st);
     }
 
@@ -779,6 +777,7 @@ impl Core {
                 let _ = crate::paths::write_replace(&self.snapshot_path(*id), &snapshot);
             }
         }
+        crate::paths::flush_later();
         self.save_now(&st, false);
     }
 
@@ -799,6 +798,7 @@ impl Core {
         for id in live {
             self.record_finish(&mut st, id, Exit { code: None, signal: None }, "server_stop");
         }
+        crate::paths::flush_later();
         self.save_now(&st, true);
     }
 }

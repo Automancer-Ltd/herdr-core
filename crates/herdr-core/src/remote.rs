@@ -579,9 +579,7 @@ pub struct Peer {
 
 fn save_peers(core: &Core, st: &State) {
     let bytes = serde_json::to_vec(&st.peers).expect("peers serialize");
-    if let Err(e) = crate::paths::write_atomic(&core.paths.state.join("peers.json"), &bytes) {
-        eprintln!("core: cannot save peers: {e}");
-    }
+    crate::paths::later(core.paths.state.join("peers.json"), Some(bytes));
 }
 
 /// A core dialed in on `conn`: calls to it go out on the same connection,
