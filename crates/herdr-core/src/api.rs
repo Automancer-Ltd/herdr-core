@@ -457,7 +457,9 @@ async fn terminal_send(core: Ctx<'_>, p: SendParams) -> Result<SendResult, RpcEr
 }
 
 async fn machine_exec(core: Ctx<'_>, p: ExecParams) -> Result<ExecResult, RpcError> {
-    crate::exec::run(core, p, from_afar(core)).await
+    let origin = core.conn.and_then(|conn| crate::remote::peer_name(core, conn));
+    let origin = origin.map(|peer| p.origin_machine.clone().unwrap_or(peer));
+    crate::exec::run(core, p, origin).await
 }
 
 fn from_afar(core: Ctx<'_>) -> bool {

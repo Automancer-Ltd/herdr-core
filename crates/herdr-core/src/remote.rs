@@ -630,6 +630,14 @@ pub fn is_peer(core: &Core, conn: &Arc<Conn>) -> bool {
     core.lock().peer_lines.values().any(|(k, _)| *k == key)
 }
 
+/// The originating machine, from the peer handshake rather than caller-supplied labels.
+pub fn peer_name(core: &Core, conn: &Arc<Conn>) -> Option<String> {
+    let st = core.lock();
+    let key = conn_key(conn);
+    let (id, _) = st.peer_lines.iter().find(|(_, (k, _))| *k == key)?;
+    st.peers.get(id).map(|peer| peer.name.clone())
+}
+
 pub fn peer_left(core: &Core, conn: &Arc<Conn>) {
     let key = conn_key(conn);
     core.lock().peer_lines.retain(|_, (k, _)| *k != key);
@@ -853,6 +861,9 @@ pub fn route(core: &Core, method: &str, params: &Value) -> Result<Option<(To, Va
         None
     };
     let Some(to) = to else { return Ok(None) };
+    if method == "machine.exec" && matches!(&to, To::Machine(_)) {
+        params["origin_machine"] = core.info.name.clone().into();
+    }
     // Our callers travel by our id (the machine names them; see `from_peer`);
     // a peer names callers from here itself.
     if let (To::Machine(_), Some(caller)) = (&to, params["caller"].as_str()) {
