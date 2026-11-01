@@ -48,6 +48,19 @@ fn a_remote_missed_invalidates_unfiltered_document_readers_with_the_local_sequen
     assert_eq!(msg["method"], "missed");
     assert_eq!(msg["params"]["seq"], 7);
     assert!(filtered_rx.try_recv().is_err());
+    // Who typed last travels with the mirror: a person's keys and an agent's input apart.
+    mirror_replace(&core, &machine, vec![json!({"address": "t1", "state": "live"})]);
+    rx.try_recv().expect("created");
+    mirror_events(&core, &machine, &line, b"{\"method\":\"event\",\"params\":{\"type\":\"input\",\"terminal\":\"t1\",\"data\":{\"input_ms\":1793000000000}}}\n");
+    mirror_events(&core, &machine, &line, b"{\"method\":\"event\",\"params\":{\"type\":\"sent\",\"terminal\":\"t1\",\"data\":{\"sent_ms\":1793000000001,\"sends\":3}}}\n");
+    let typed: Value = serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
+    let sent: Value = serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
+    assert_eq!((typed["params"]["type"].as_str(), sent["params"]["type"].as_str()), (Some("input"), Some("sent")));
+    let record = core.lock().mirrors[&machine.id]["rohan/t1"].clone();
+    assert_eq!(
+        (record["input_ms"].as_u64(), record["sent_ms"].as_u64(), record["sends"].as_u64()),
+        (Some(1793000000000), Some(1793000000001), Some(3))
+    );
     core.lock().machines.clear();
     mirror_event(&core, &machine, json!({"type": "doc", "data": {"name": "app", "version": 1}}));
     assert!(rx.try_recv().is_err(), "removed machines must not emit doc events");
