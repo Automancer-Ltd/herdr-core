@@ -827,6 +827,21 @@ fn write_newest(generation: u64, path: &Path, bytes: &[u8], sync: bool) {
     }
 }
 
+/// Waits (up to 10 s) until the newest registry save has reached the disk: `hc-save` takes a write off the queue
+/// before it writes it, so an empty queue alone does not mean the write finished. Tests call it before removing
+/// their state folder.
+#[cfg(test)]
+pub fn flush_saves() {
+    let until = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < until {
+        let issued = WRITES.next.load(std::sync::atomic::Ordering::SeqCst) - 1;
+        if *WRITES.written.lock().unwrap_or_else(|p| p.into_inner()) >= issued {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 fn writer() {
     loop {
         let (generation, path, bytes) = {
