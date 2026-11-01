@@ -72,9 +72,8 @@ impl Session {
         let path = self.root.join("state/herdr-core/test/terminals.json");
         wait_until("terminal saved before simulated crash", || {
             std::fs::read(&path).is_ok_and(|bytes| {
-                serde_json::from_slice::<Value>(&bytes).is_ok_and(|saved| {
-                    saved["terminals"].as_object().is_some_and(|ts| ts.values().any(&want))
-                })
+                serde_json::from_slice::<Value>(&bytes)
+                    .is_ok_and(|saved| saved["terminals"].as_object().is_some_and(|ts| ts.values().any(&want)))
             })
         });
     }
