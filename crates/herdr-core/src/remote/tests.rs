@@ -52,5 +52,6 @@ fn a_remote_missed_invalidates_unfiltered_document_readers_with_the_local_sequen
     mirror_event(&core, &machine, json!({"type": "doc", "data": {"name": "app", "version": 1}}));
     assert!(rx.try_recv().is_err(), "removed machines must not emit doc events");
     drop(core);
+    crate::paths::flush_later(); // the hc-files thread may still be writing into it
     std::fs::remove_dir_all(root).unwrap();
 }

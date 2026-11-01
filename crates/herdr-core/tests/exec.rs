@@ -246,7 +246,9 @@ fn a_client_that_stops_reading_its_replies_is_disconnected_not_kept_in_memory() 
     // 8 replies of ~11 MB, none read: past the cap it hangs up on us.
     // Wait for the hangup without consuming bytes. Draining after a fixed sleep
     // can let a loaded core keep up before its reply queue ever reaches the cap.
-    let mut fd = libc::pollfd { fd: stream.as_raw_fd(), events: 0, revents: 0 };
+    // Ask for POLLHUP: Linux reports it regardless, but macOS registers nothing
+    // for events 0 and would time out even after the core hung up.
+    let mut fd = libc::pollfd { fd: stream.as_raw_fd(), events: libc::POLLHUP, revents: 0 };
     loop {
         let ready = unsafe { libc::poll(&mut fd, 1, 20_000) };
         if ready < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {

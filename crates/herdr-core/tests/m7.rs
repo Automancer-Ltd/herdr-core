@@ -162,8 +162,13 @@ fn the_first_message_waits_for_the_agent_to_be_ready() {
 fn a_background_templates_first_task_survives_slow_startup_output() {
     let mut s = session();
     s.env.push(("HC_SETTLE_MS".into(), "800".into()));
-    let command = ECHO_AGENT
-        .replace("stty -echo;", "stty -echo; i=0; while [ $i -lt 60 ]; do echo starting; sleep 0.1; i=$((i+1)); done;");
+    // Six to seven seconds of output by the clock: past the five-second limit of
+    // a regular send, inside the ten-second startup window. A count of sleeps
+    // drifts past ten seconds where starting a process is slow (macOS CI).
+    let command = ECHO_AGENT.replace(
+        "stty -echo;",
+        "stty -echo; end=$(($(date +%s)+7)); while [ $(date +%s) -lt $end ]; do echo starting; sleep 0.1; done;",
+    );
     template(&s, "slow", &format!("---\ncommand: {command}\n---\n"));
     let r = s.json(&["run", "--bg", "slow", "slow-start-task"]);
     assert_eq!(r["first_message"]["sent"], true, "{r}");
