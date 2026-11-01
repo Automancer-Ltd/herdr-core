@@ -168,7 +168,7 @@ impl Core {
             return not_sent("it exited before it was ready".into());
         }
         let text = self.tagged(from, id, text, true);
-        match self.send(id, &text, false, None).await {
+        match self.send_first(id, &text).await {
             Ok(sent) => FirstMessage { sent: true, started: sent.started, reason: None, turn: Some(sent.turn) },
             Err(e) => not_sent(e.message),
         }

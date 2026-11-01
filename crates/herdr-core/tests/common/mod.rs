@@ -61,6 +61,19 @@ impl Session {
         self.program(&self.bin)
     }
 
+    /// Crash tests recover persisted terminals; let the off-lock writer save
+    /// their setup before killing the core that owns it.
+    pub fn wait_saved_terminal(&self, pid: i64) {
+        let path = self.root.join("state/herdr-core/test/terminals.json");
+        wait_until("terminal saved before simulated crash", || {
+            std::fs::read(&path).is_ok_and(|bytes| {
+                serde_json::from_slice::<Value>(&bytes).is_ok_and(|saved| {
+                    saved["terminals"].as_object().is_some_and(|ts| ts.values().any(|t| t["pid"] == pid))
+                })
+            })
+        });
+    }
+
     /// Any program with this session's environment (its HOME, XDG dirs, env).
     pub fn program(&self, program: impl AsRef<std::ffi::OsStr>) -> Command {
         let mut cmd = Command::new(program);

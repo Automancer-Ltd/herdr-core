@@ -15,7 +15,7 @@ const KEY_GAP: Duration = Duration::from_millis(30);
 pub const OUTPUT_SETTLE: Duration = Duration::from_millis(800);
 /// How long after start an agent may still be setting itself up.
 const STARTUP_MS: u64 = 10_000;
-/// The longest a send waits for a starting agent to settle.
+/// The longest a regular send waits for a starting agent to settle.
 const SETTLE_MAX: Duration = Duration::from_secs(5);
 
 /// A person's typing, as it affects agent input to one terminal.
@@ -154,10 +154,18 @@ impl Core {
     /// Paste + Enter, after a person has paused typing. Refuses a blocked
     /// program (typing would answer its dialog) unless `force`.
     pub async fn send(&self, id: u32, text: &str, force: bool, only_if: Option<&str>) -> Result<Sent, RpcError> {
-        if let Some(t) = self.lock().reg.terminals.get(&id) {
-            t.check_program()?;
-        }
-        self.settle(id).await?;
+        self.settle(id, SETTLE_MAX).await?;
+        self.send_settled(id, text, force, only_if).await
+    }
+
+    /// A template owns its first task: wait through the startup window rather
+    /// than handing an untyped task back to its caller after a shorter cutoff.
+    pub(crate) async fn send_first(&self, id: u32, text: &str) -> Result<Sent, RpcError> {
+        self.settle(id, Duration::from_millis(STARTUP_MS)).await?;
+        self.send_settled(id, text, false, None).await
+    }
+
+    async fn send_settled(&self, id: u32, text: &str, force: bool, only_if: Option<&str>) -> Result<Sent, RpcError> {
         let (status, turn, reported) = self
             .type_in(id, quiet(), |st, t| {
                 let word = state_word(t);
@@ -215,8 +223,11 @@ impl Core {
     /// A starting agent can report before it is ready for a paste (Pi swaps its
     /// input box right after its first report and drops a paste in flight):
     /// in its first seconds, wait until its screen has been still a moment.
-    async fn settle(&self, id: u32) -> Result<(), RpcError> {
-        let deadline = Instant::now() + SETTLE_MAX;
+    async fn settle(&self, id: u32, max: Duration) -> Result<(), RpcError> {
+        if let Some(t) = self.lock().reg.terminals.get(&id) {
+            t.check_program()?;
+        }
+        let deadline = Instant::now() + max;
         loop {
             let ready = {
                 let st = self.lock();

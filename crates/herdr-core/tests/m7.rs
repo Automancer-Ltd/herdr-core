@@ -159,6 +159,22 @@ fn the_first_message_waits_for_the_agent_to_be_ready() {
 }
 
 #[test]
+fn a_background_templates_first_task_survives_slow_startup_output() {
+    let mut s = session();
+    s.env.push(("HC_SETTLE_MS".into(), "800".into()));
+    let command = ECHO_AGENT
+        .replace("stty -echo;", "stty -echo; i=0; while [ $i -lt 60 ]; do echo starting; sleep 0.1; i=$((i+1)); done;");
+    template(&s, "slow", &format!("---\ncommand: {command}\n---\n"));
+    let r = s.json(&["run", "--bg", "slow", "slow-start-task"]);
+    assert_eq!(r["first_message"]["sent"], true, "{r}");
+    assert_eq!(r["first_message"]["started"], true, "{r}");
+    let t = r["address"].as_str().unwrap();
+    wait_until("first task delivered once without a caller send", || {
+        text(&s, t).matches("got:slow-start-task").count() == 1
+    });
+}
+
+#[test]
 fn a_template_can_override_how_messages_are_submitted() {
     let s = session();
     template(
