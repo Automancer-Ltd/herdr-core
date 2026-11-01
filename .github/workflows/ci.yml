@@ -1,11 +1,18 @@
 # Every push to master and every pull request: formatting, the dependency
 # policy and clippy for Windows from Linux, then the whole suite on Linux
-# (real PTYs, real processes). What is too slow for every pull request — the
-# other platforms, clippy for the release target, and the upgrade test against
-# the last release — is in extended.yml, run on demand.
+# (real PTYs, real processes). That verdict must fit five minutes.
 #
-# Runner choice: the hosted x86_64 Linux jobs take the controller-owned
-# CI_RUNNER variable (testing skill, rule 4), never a hard-coded label.
+# The extended suite — clippy for the release target, the macOS and Windows
+# suites, and the upgrade test against the last release — runs only on
+# workflow_dispatch, and every one of its jobs is bounded at ten minutes. It
+# lives in this file rather than a workflow of its own because GitHub only
+# dispatches a workflow that exists on the repository's default branch, and
+# this fork's default branch is upstream's master; a separate extended.yml
+# could be committed here and never started.
+#
+# Runner choice: hosted x86_64 Linux jobs take the controller-owned CI_RUNNER
+# variable (testing skill, rule 4), never a hard-coded label; the arm, macOS
+# and Windows jobs need a specific host and keep their specialist label.
 #
 # Cache rules: one pinned toolchain so caches survive
 # stable bumps; only master pushes save, so PR caches can't evict the ones
@@ -24,7 +31,8 @@ permissions:
   contents: read
 
 # A newer push to a pull request makes the older run pointless. On master,
-# runs queue instead: a cancelled master run never saves its cache.
+# runs queue instead: a cancelled master run never saves its cache. A dispatch
+# on a branch takes its own group, so it never cancels that branch's PR run.
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -45,7 +53,7 @@ env:
 jobs:
   # Cheap and on every push: formatting, and clippy for Windows from Linux
   # (zig stubbed: type-checking needs no libghostty-vt), so Windows code is
-  # checked even though the Windows tests only run in the extended suite.
+  # checked even on changes that never run the Windows tests.
   lint:
     runs-on: ${{ fromJSON(vars.CI_RUNNER || '"ubuntu-latest"') }}
     timeout-minutes: 5
@@ -75,7 +83,7 @@ jobs:
 
   test:
     # Linux tests the static musl build, which is what releases ship. macOS and
-    # Windows run on demand in extended.yml: their jobs cost minutes each, and
+    # Windows run in the extended suite below: their jobs cost minutes each, and
     # the whole pull-request verdict must fit five.
     runs-on: ${{ fromJSON(vars.CI_RUNNER || '"ubuntu-latest"') }}
     timeout-minutes: 5
@@ -103,8 +111,7 @@ jobs:
         shell: bash
         run: cargo test --locked --no-fail-fast --target x86_64-unknown-linux-musl -- --test-threads 2
 
-  # The one check master's ruleset requires. It has no needs-conditional of its
-  # own, so it always reports.
+  # The one check master's ruleset requires.
   ci-ok:
     needs: [lint, test]
     if: always()
@@ -112,3 +119,135 @@ jobs:
     timeout-minutes: 5
     steps:
       - run: '[ "${{ needs.lint.result }}" = success ] && [ "${{ needs.test.result }}" = success ]'
+
+  # ---- the extended suite: workflow_dispatch only --------------------------
+
+  clippy-linux:
+    # clippy for the release target recompiles the workspace and is cold on a
+    # new toolchain, so it is checked on demand rather than on every change.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ${{ fromJSON(vars.CI_RUNNER || '"ubuntu-latest"') }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: clippy
+          targets: x86_64-unknown-linux-musl
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.16.0
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: linux-dev # the test job's cache: same build
+          cache-workspace-crates: true
+          cache-bin: false
+          save-if: ${{ env.SAVE_CACHES }}
+      - run: cargo clippy --locked --target x86_64-unknown-linux-musl --all-targets -- -D warnings
+
+  test-other-platforms:
+    if: github.event_name == 'workflow_dispatch'
+    strategy:
+      fail-fast: false
+      # macOS (3 cores): fewer tests at once, so each one's terminals keep
+      # their timing. Windows: Unix tests skip themselves; tests/windows.rs
+      # runs instead.
+      matrix:
+        include:
+          - { os: macos, runner: macos-15, target: aarch64-apple-darwin }
+          - { os: windows, runner: windows-2025, target: x86_64-pc-windows-msvc }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: clippy
+          targets: ${{ matrix.target }}
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.16.0
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: ${{ matrix.os }}-dev
+          cache-workspace-crates: true
+          cache-bin: false
+          save-if: ${{ env.SAVE_CACHES }}
+      # Windows only: clippy-linux covers the shared unix code on every release,
+      # and the macOS suite compiles every cfg(macos) line, so a macOS clippy
+      # pass would spend four of the job's ten minutes on what those two cover.
+      - if: matrix.os == 'windows'
+        run: cargo clippy --locked --target ${{ matrix.target }} --all-targets -- -D warnings
+      # Windows' own ConPTY swallows answers to programs: hc ships Microsoft's.
+      - if: matrix.os == 'windows'
+        shell: pwsh
+        run: scripts/fetch-conpty.ps1 -Dest target/${{ matrix.target }}/debug
+      # cli_docs runs the built binary's help: generated reference freshness
+      # and README/docs command/flag checks, with file:line failures.
+      - name: Tests (including human docs)
+        shell: bash
+        run: |
+          # Full-screen scrolling tests are disabled on macOS CI because runner timing is unreliable.
+          only=()
+          if [ "${{ matrix.os }}" = macos ]; then
+            for t in crates/herdr-core/tests/*.rs; do
+              name=$(basename "$t" .rs)
+              [ "$name" = stitch ] || only+=(--test "$name")
+            done
+            only+=(--lib --bins)
+          fi
+          cargo test --locked --no-fail-fast --target ${{ matrix.target }} "${only[@]}" -- --test-threads 2
+
+  upgrade:
+    # Building the last release takes minutes: an update must never break
+    # running terminals, but the build does not belong in a pull-request
+    # verdict.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ${{ fromJSON(vars.CI_RUNNER || '"ubuntu-latest"') }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
+          fetch-depth: 0 # the release tags
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.16.0
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: linux-dev # the test job's cache: same build
+          cache-workspace-crates: true
+          cache-bin: false
+          save-if: false
+      - name: The last release
+        id: last
+        run: |
+          tag=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          [ -n "$tag" ] && echo "sha=$(git rev-parse --short "$tag")" >> "$GITHUB_OUTPUT" || true
+          # Releases before 0.2 built Ghostty for the building CPU: a copy
+          # cached on one runner can crash on another (SIGILL).
+          echo "cpu=$(grep -m1 '^flags' /proc/cpuinfo | sha256sum | cut -c1-12)" >> "$GITHUB_OUTPUT"
+      # A release's binary never changes: built once, kept by its tag (and CPU).
+      - if: steps.last.outputs.tag != ''
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /var/tmp/hc-upgrade/${{ steps.last.outputs.sha }}
+          key: upgrade-from-${{ steps.last.outputs.tag }}-${{ steps.last.outputs.sha }}-${{ steps.last.outputs.cpu }}
+      - name: Upgrade from the last release
+        run: |
+          tag=${{ steps.last.outputs.tag }}
+          if [ -z "$tag" ]; then echo "no release yet: nothing to upgrade from"; exit 0; fi
+          scripts/upgrade-test.sh "$tag"
