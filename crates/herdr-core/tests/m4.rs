@@ -20,7 +20,18 @@ fn run(s: &Session, script: &str) -> String {
 }
 
 fn shows(s: &Session, t: &str, needle: &str) {
-    wait_until(&format!("{needle:?} in {t}"), || text(s, t).contains(needle));
+    let start = Instant::now();
+    loop {
+        let screen = text(s, t);
+        if screen.contains(needle) {
+            return;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "timed out waiting for {needle:?} in {t}; it shows:\n{screen}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 fn status(s: &Session, t: &str) -> Value {
@@ -211,13 +222,13 @@ fn a_program_that_never_reads_its_input_stalls_nobody() {
 #[test]
 fn keys_follow_the_programs_keyboard_modes() {
     let s = session();
-    let t = s.json(&["run", "--bg", "sh", "-c", "printf '\\033[?1h'; stty raw -echo; od -An -c"])["address"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    shows(&s, &t, ""); // started
-    std::thread::sleep(Duration::from_millis(200));
-    s.json(&["keys", &t, "up", "ctrl+c", "a", "a", "a", "a", "a", "a", "a", "a", "a", "a", "a", "a"]);
+    // od prints what arrived once input pauses for 3 s (min 0 time 30), however
+    // many bytes that is; sleep keeps the terminal live for the bad-key check.
+    let program = "printf '\\033[?1h'; stty raw -echo min 0 time 30; echo raw-ready; od -An -c; sleep 100";
+    let t = s.json(&["run", "--bg", "sh", "-c", program])["address"].as_str().unwrap().to_string();
+    // Keys sent before stty raw meet a cooked terminal, where ctrl+c kills od.
+    shows(&s, &t, "raw-ready");
+    s.json(&["keys", &t, "up", "ctrl+c", "a"]);
     shows(&s, &t, "033   O   A 003   a");
     let (code, err) = s.err(&["keys", &t, "hyper+q"]);
     assert_eq!((code, err["error"]["kind"].as_str()), (6, Some("invalid_params")));
