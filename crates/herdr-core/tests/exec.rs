@@ -233,6 +233,7 @@ fn exec_ends_when_its_caller_goes_away_here_or_across_a_line() {
 #[test]
 fn a_client_that_stops_reading_its_replies_is_disconnected_not_kept_in_memory() {
     use std::io::Read;
+    use std::os::fd::AsRawFd;
     let s = Session::new();
     s.json(&["server", "start"]);
     let mut stream = std::os::unix::net::UnixStream::connect(s.socket()).unwrap();
@@ -243,7 +244,18 @@ fn a_client_that_stops_reading_its_replies_is_disconnected_not_kept_in_memory() 
         stream.write_all(&herdr_core::wire::encode(0, herdr_core::wire::DATA, call.to_string().as_bytes())).unwrap();
     }
     // 8 replies of ~11 MB, none read: past the cap it hangs up on us.
-    std::thread::sleep(Duration::from_secs(3));
+    // Wait for the hangup without consuming bytes. Draining after a fixed sleep
+    // can let a loaded core keep up before its reply queue ever reaches the cap.
+    let mut fd = libc::pollfd { fd: stream.as_raw_fd(), events: 0, revents: 0 };
+    loop {
+        let ready = unsafe { libc::poll(&mut fd, 1, 20_000) };
+        if ready < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+            continue;
+        }
+        assert_eq!(ready, 1, "the unread connection must be disconnected before we drain it");
+        assert_ne!(fd.revents & libc::POLLHUP, 0, "the server hung up: {:#x}", fd.revents);
+        break;
+    }
     stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     let mut got = Vec::new();
     stream.read_to_end(&mut got).expect("hung up on, not left waiting");
