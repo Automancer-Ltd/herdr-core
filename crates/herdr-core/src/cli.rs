@@ -486,6 +486,7 @@ fn run(cmd: Option<Cmd>, json: bool, asked: bool) -> Result<Option<Out>, RpcErro
             Out { json: r, human }
         }
         Cmd::Exec(mut p) => {
+            p.caller = Some(caller());
             if p.on.is_none() {
                 p.cwd = from_here(p.cwd);
             }

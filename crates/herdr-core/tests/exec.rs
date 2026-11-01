@@ -72,6 +72,56 @@ fn exec_returns_exactly_what_the_program_wrote_here_and_on_a_machine() {
 }
 
 #[test]
+fn exec_records_its_owner_on_the_machine_that_runs_it() {
+    let rohan = Session::new();
+    let mut s = Session::new();
+    s.env.push(fake_ssh(&s, &[("rohan", &rohan)]));
+    s.json(&["machine", "add", "rohan"]);
+    let origin = s.json(&["server", "status"])["core"]["name"].as_str().unwrap().to_string();
+    let origin_id = s.json(&["server", "status"])["core"]["id"].as_str().unwrap().to_string();
+    let state = rohan.root.join("state/herdr-core/test");
+    assert!(rohan.program("mkfifo").arg(rohan.root.join("finish")).status().unwrap().success());
+    let mut child = s
+        .cmd()
+        .env("HC_TERMINAL_ID", "t42")
+        .args(["exec", "--on", "rohan", "sh", "-c", "echo ready > ready; read done < finish; exit 7"])
+        .spawn()
+        .unwrap();
+    // Hold the real remote process until the observer has read its record.
+    wait_until("the remote program started", || rohan.root.join("ready").exists());
+    let tokens = state.join("execs");
+    let file = std::fs::read_dir(&tokens).unwrap().next().unwrap().unwrap().path();
+    let record: serde_json::Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    assert_eq!(record["origin_machine"], origin);
+    // Both test cores have the same hostname: the peer uses its permanent id to avoid ambiguity.
+    assert_eq!(record["caller_terminal"], format!("{origin_id}/t42"));
+    assert_eq!(record["argv0"], "sh");
+    assert!(record["started_ms"].is_u64());
+    let events = || -> Vec<serde_json::Value> {
+        std::fs::read_to_string(state.join("core.log"))
+            .unwrap()
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .filter(|v: &serde_json::Value| v["token"] == record["token"])
+            .collect()
+    };
+    let start = events();
+    assert_eq!(start.len(), 1);
+    assert_eq!(start[0]["event"], "exec_start");
+    for key in ["origin_machine", "caller_terminal", "argv0", "started_ms"] {
+        assert_eq!(start[0][key], record[key], "{key}");
+    }
+    std::fs::write(rohan.root.join("finish"), "done\n").unwrap();
+    assert_eq!(child.wait().unwrap().code(), Some(7));
+    let end = events();
+    assert_eq!(end.len(), 2);
+    assert_eq!(end[1]["event"], "exec_end");
+    assert_eq!(end[1]["code"], 7);
+    assert_eq!(end[1]["timed_out"], false);
+    assert!(!file.exists());
+}
+
+#[test]
 fn a_relative_folder_there_starts_in_its_home_never_where_its_core_runs() {
     // The remote core's cwd differs from its HOME.
     let rohan = Session::new();
@@ -118,6 +168,16 @@ fn exec_ends_everything_it_started_when_it_exits_or_times_out() {
         s.hc(&["exec", "--timeout", "1", "sh", "-c", &format!("{} echo started; sleep 100", stubborn(&s, "slow"))]);
     assert_eq!((out.stdout.as_slice(), out.status.code()), (&b"started\n"[..], Some(124)), "what came so far");
     gone(pid_in(&s, "slow"));
+    let events: Vec<serde_json::Value> = std::fs::read_to_string(s.root.join("state/herdr-core/test/core.log"))
+        .unwrap()
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .filter(|event: &serde_json::Value| event["event"] == "exec_end")
+        .collect();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0]["code"], 0);
+    assert_eq!(events[0]["timed_out"], false);
+    assert_eq!(events[1]["timed_out"], true);
 }
 
 #[test]

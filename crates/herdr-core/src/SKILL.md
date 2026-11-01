@@ -145,6 +145,17 @@ text rewriting needed: only the edit travels.
 Remote paths start at that machine's home unless you set `--cwd`; local
 paths start at your current folder. Prefer explicit paths for remote work.
 
+On the machine running an exec, its state directory's `execs/<HC_SCOPE>` file
+contains JSON with `origin_machine`, `caller_terminal`, `argv0`, `started_ms`
+(Unix milliseconds), and `token`. The CLI supplies its `HC_TERMINAL_ID`, or
+its parent process when outside a terminal; API callers may supply `caller`.
+The forwarding core supplies `origin_machine` across the peer line. Older
+callers without `caller` are recorded with a null terminal.
+`core.log` keeps one JSON `exec_start` and `exec_end` line with those same
+fields. Normal ends add `code`, `signal`, and `timed_out`; failed starts and
+disconnections add a `reason`. The token file is removed during cleanup;
+the log remains, so ownership can be read from that machine alone.
+
 ## Status, recovery, and cleanup
 
 - State is `live` or `finished`. Status comes from the program's OSC 7501

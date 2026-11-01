@@ -2844,6 +2844,18 @@
           }
         },
         {
+          "description": "Who is calling (`HC_TERMINAL_ID` inside a terminal, else the CLI's parent process).",
+          "name": "caller",
+          "required": false,
+          "schema": {
+            "description": "Who is calling (`HC_TERMINAL_ID` inside a terminal, else the CLI's parent process).",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        {
           "description": "Working directory (default: where hc runs; through the API, the core's;\nwith --on, that machine's home).",
           "name": "cwd",
           "required": false,
@@ -2898,6 +2910,18 @@
           "required": false,
           "schema": {
             "description": "Run it on another machine (see `hc machine ls`).",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        {
+          "description": "Originating machine's name, filled by the forwarding core for a remote exec.",
+          "name": "origin_machine",
+          "required": false,
+          "schema": {
+            "description": "Originating machine's name, filled by the forwarding core for a remote exec.",
             "type": [
               "string",
               "null"

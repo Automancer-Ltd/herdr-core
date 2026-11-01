@@ -6,7 +6,9 @@
 use crate::api::{ExecParams, ExecResult};
 use crate::rpc::RpcError;
 use crate::runtime::Core;
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -117,6 +119,52 @@ fn tokens_dir(state: &Path) -> PathBuf {
     state.join("execs")
 }
 
+/// Pairs a start with its outcome, including a dropped request. File IO stays off the core thread.
+struct Audit {
+    record: Option<Value>,
+    log: PathBuf,
+    /// Before a process tree takes over token cleanup.
+    file: Option<PathBuf>,
+}
+
+impl Audit {
+    fn append(log: &Path, mut record: Value, event: &str, outcome: Value) -> std::io::Result<()> {
+        record["event"] = event.into();
+        record.as_object_mut().expect("exec record").extend(outcome.as_object().expect("exec outcome").clone());
+        let mut bytes = serde_json::to_vec(&record)?;
+        bytes.push(b'\n');
+        std::fs::OpenOptions::new().create(true).append(true).open(log)?.write_all(&bytes)
+    }
+
+    async fn finish(mut self, outcome: Value) {
+        let record = self.record.take().expect("unfinished exec");
+        let log = self.log.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            if let Err(e) = Self::append(&log, record, "exec_end", outcome) {
+                eprintln!("core: cannot log exec end: {e}");
+            }
+        })
+        .await;
+    }
+}
+
+impl Drop for Audit {
+    fn drop(&mut self) {
+        if let Some(record) = self.record.take() {
+            let log = self.log.clone();
+            let file = self.file.clone();
+            std::thread::spawn(move || {
+                if let Err(e) = Self::append(&log, record, "exec_end", json!({"reason": "cancelled"})) {
+                    eprintln!("core: cannot log cancelled exec: {e}");
+                }
+                if let Some(file) = file {
+                    let _ = std::fs::remove_file(file);
+                }
+            });
+        }
+    }
+}
+
 /// At start: sweep what execs of a crashed core left running.
 pub fn sweep_leftovers(state: &Path) {
     let dir = tokens_dir(state);
@@ -148,7 +196,7 @@ pub fn folder(cwd: Option<&str>, from_afar: bool) -> String {
 }
 
 /// Runs it to the end (exit, timeout, or the core stopping) and returns what it wrote.
-pub async fn run(core: &Arc<Core>, p: ExecParams, from_afar: bool) -> Result<ExecResult, RpcError> {
+pub async fn run(core: &Arc<Core>, p: ExecParams, origin: Option<String>) -> Result<ExecResult, RpcError> {
     let argv = program(&p)?;
     let limit = timeout(p.timeout)?;
     let input = match &p.input {
@@ -161,15 +209,31 @@ pub async fn run(core: &Arc<Core>, p: ExecParams, from_afar: bool) -> Result<Exe
     };
     crate::api::not_stopping(&core.lock())?;
     let slot = Slot::take()?;
+    let from_afar = origin.is_some();
+    let origin = origin.unwrap_or_else(|| core.info.name.clone());
     let cwd = folder(p.cwd.as_deref(), from_afar);
     let token = crate::sweep::token();
+    let caller = p.caller.as_ref().map(|caller| if from_afar { caller.clone() } else { format!("{origin}/{caller}") });
+    let record = json!({
+        "token": token, "origin_machine": origin, "caller_terminal": caller,
+        "argv0": argv[0], "started_ms": crate::runtime::now_ms(),
+    });
     let dir = tokens_dir(&core.paths.state);
     let file = dir.join(&token);
     let (d, f) = (dir.clone(), file.clone());
-    tokio::task::spawn_blocking(move || std::fs::create_dir_all(&d).and_then(|()| std::fs::write(&f, b"")))
-        .await
-        .map_err(|e| RpcError::internal(e.to_string()))?
-        .map_err(|e| RpcError::internal(format!("cannot note the exec: {e}")))?;
+    let log = core.paths.state.join("core.log");
+    let mut audit = tokio::task::spawn_blocking(move || {
+        std::fs::create_dir_all(&d)?;
+        std::fs::write(&f, serde_json::to_vec(&record)?)?;
+        if let Err(e) = Audit::append(&log, record.clone(), "exec_start", json!({})) {
+            let _ = std::fs::remove_file(&f);
+            return Err(e);
+        }
+        Ok(Audit { record: Some(record), log, file: Some(f) })
+    })
+    .await
+    .map_err(|e| RpcError::internal(e.to_string()))?
+    .map_err(|e| RpcError::internal(format!("cannot note the exec: {e}")))?;
     let mut cmd = tokio::process::Command::new(&argv[0]);
     #[cfg(windows)]
     if crate::platform::is_shell_line(&argv) {
@@ -192,6 +256,7 @@ pub async fn run(core: &Arc<Core>, p: ExecParams, from_afar: bool) -> Result<Exe
         Ok(child) => child,
         Err(e) => {
             let _ = std::fs::remove_file(&file);
+            audit.finish(json!({"reason": "spawn_failed"})).await;
             let what = if std::path::Path::new(&cwd).is_dir() { argv[0].clone() } else { format!("folder {cwd}") };
             return Err(RpcError::new("spawn_failed", format!("cannot start {what}: {e}"), ""));
         }
@@ -203,12 +268,14 @@ pub async fn run(core: &Arc<Core>, p: ExecParams, from_afar: bool) -> Result<Exe
             let _ = child.start_kill();
             let _ = child.wait().await;
             let _ = std::fs::remove_file(&file);
+            audit.finish(json!({"reason": "containment_failed"})).await;
             return Err(RpcError::new("spawn_failed", format!("cannot contain {}: {e}", argv[0]), ""));
         }
     };
     let (out, err) = (child.stdout.take().expect("piped"), child.stderr.take().expect("piped"));
     let stdin = child.stdin.take();
     let mut tree = Tree { child: Some(child), group, token, file, slot: Some(slot) };
+    audit.file = None;
     let (ended, ended_rx) = watch::channel(false);
     let main = async {
         let stop = stopping(core);
@@ -229,6 +296,13 @@ pub async fn run(core: &Arc<Core>, p: ExecParams, from_afar: bool) -> Result<Exe
         capture(err, &mut stderr, MAX_STDERR, ended_rx.clone()),
         feed(stdin, input.unwrap_or_default(), ended_rx)
     );
+    audit
+        .finish(json!({
+            "code": status.as_ref().and_then(|s| s.code()),
+            "signal": status.as_ref().and_then(crate::platform::exit_signal),
+            "timed_out": timed_out,
+        }))
+        .await;
     if core.lock().stopping {
         return Err(RpcError::new("unavailable", "the core stopped during the exec", ""));
     }

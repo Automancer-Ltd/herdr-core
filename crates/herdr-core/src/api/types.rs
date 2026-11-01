@@ -550,6 +550,14 @@ pub struct PutResult {
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct ExecParams {
+    /// Who is calling (`HC_TERMINAL_ID` inside a terminal, else the CLI's parent process).
+    #[arg(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caller: Option<String>,
+    /// Originating machine's name, filled by the forwarding core for a remote exec.
+    #[arg(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_machine: Option<String>,
     /// Program and arguments, run as given (no shell).
     #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
