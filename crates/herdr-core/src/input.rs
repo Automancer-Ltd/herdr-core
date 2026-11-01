@@ -131,6 +131,7 @@ impl Core {
             st.gates.entry(id).or_default().busy = true;
             prepared
         };
+        let typed = steps.iter().any(|s| matches!(s, Step::Write(_)));
         for step in steps {
             match step {
                 Step::Write(bytes) => {
@@ -142,6 +143,14 @@ impl Core {
             }
         }
         let mut st = self.lock();
+        if typed && let Some(t) = st.reg.terminals.get_mut(&id) {
+            // An agent's input went in: say so, apart from a person's (`input_ms`).
+            let at = crate::runtime::now_ms();
+            t.sent_ms = Some(at);
+            t.sends += 1;
+            let sends = t.sends;
+            self.emit(&mut st, "sent", id, serde_json::json!({"sent_ms": at, "sends": sends}));
+        }
         let gate = st.gates.entry(id).or_default();
         gate.busy = false;
         let held = std::mem::take(&mut gate.held);

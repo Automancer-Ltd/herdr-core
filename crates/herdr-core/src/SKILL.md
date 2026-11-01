@@ -161,6 +161,10 @@ the log remains, so ownership can be read from that machine alone.
 - State is `live` or `finished`. Status comes from the program's OSC 7501
   reports: `idle`, `working`, `done`, `blocked`, `error`; plain programs
   report none. Do not guess status from screen text.
+- Who typed: `hc get` shows `input_ms` (a person last typed or clicked in an
+  attached viewer; null if never) apart from `sent_ms` and `sends` (an agent's
+  `send`, `keys`, `interrupt`, a template task or notes). A `turn` also ends
+  with no input at all, so tell input apart by these, not by turns.
 - `blocked` means a person is needed (permission or a question): read the
   screen and ask your user. `send` refuses unless `--force`; don't use it to
   bypass a permission decision. `error`: read why, then send or kill.
