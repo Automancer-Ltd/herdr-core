@@ -272,7 +272,7 @@
             "type": "array"
           },
           "cwd": {
-            "description": "Its working directory now (resolved by the OS).",
+            "description": "Its working directory now (resolved by the OS); empty when the OS keeps it private (another user's program).",
             "type": "string"
           },
           "name": {

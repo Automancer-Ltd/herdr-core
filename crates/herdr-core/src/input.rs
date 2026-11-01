@@ -317,14 +317,19 @@ impl Core {
 
     /// The process group in the foreground of terminal `id`, or -1.
     pub(crate) async fn foreground(&self, id: u32) -> i32 {
+        self.ask_foreground(id).await.unwrap_or(-1)
+    }
+
+    /// The holder's answer (a process group, or -1 for none), or None when
+    /// there is no holder to ask or it didn't answer within a second.
+    pub(crate) async fn ask_foreground(&self, id: u32) -> Option<i32> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         {
             let mut st = self.lock();
+            st.link(id)?.send(&proto::frame(proto::FOREGROUND, id, &[]));
             st.foreground.entry(id).or_default().push(tx);
-            let Some(link) = st.link(id) else { return -1 };
-            link.send(&proto::frame(proto::FOREGROUND, id, &[]));
         }
-        tokio::time::timeout(Duration::from_secs(1), rx).await.ok().and_then(Result::ok).unwrap_or(-1)
+        tokio::time::timeout(Duration::from_secs(1), rx).await.ok()?.ok()
     }
 }
 

@@ -329,7 +329,7 @@ impl Registry {
                     "holder_lost" | "stopped_by_restart" | "server_stop" | "host_shutdown" | "signaled"
                 );
             t.state = if pending { "live" } else { "finished" }.into();
-            if let Some(f) = &t.foreground {
+            if let Some(f) = t.foreground.as_ref().filter(|f| !f.cwd.is_empty()) {
                 t.last_cwd = Some(f.cwd.clone());
             }
             if pending {

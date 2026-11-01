@@ -35,3 +35,11 @@ fn what_runs_in_a_terminal_and_where_is_on_its_record_and_evented() {
     assert_eq!(canonical(event["cwd"].as_str().unwrap()), canonical(sub.to_str().unwrap()));
     assert_eq!(get(&s, &t)["foreground"], event, "the record says the same");
 }
+
+#[test]
+fn a_get_right_after_a_start_says_what_runs_without_waiting_for_the_poll() {
+    let mut s = Session::new();
+    s.env.push(("HC_FOREGROUND_MS".into(), "600000".into()));
+    let t = run(&s, &["sleep", "100"]);
+    assert_eq!(get(&s, &t)["foreground"]["argv"], json!(["sleep", "100"]));
+}
