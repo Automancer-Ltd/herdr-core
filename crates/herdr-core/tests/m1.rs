@@ -352,6 +352,7 @@ fn losing_the_holder_finishes_everything() {
     wait_until("working", || get(&s, &t)["status"]["state"] == "working");
     let core = status(&s)["pid"].as_i64().unwrap();
     let holder = holder_pid(&s);
+    s.wait_saved_terminal(get(&s, &t)["pid"].as_i64().unwrap());
     kill9(core);
     kill9(holder);
 
@@ -416,6 +417,7 @@ fn an_update_rolls_new_terminals_onto_a_new_holder_while_the_old_one_drains() {
     assert!(pid_alive(old_holder), "the old holder keeps the old terminal");
 
     // Still one core for both: a crash adopts terminals from both holders.
+    s.wait_saved_terminal(get(&s, &new)["pid"].as_i64().unwrap());
     kill9(status(&s)["pid"].as_i64().unwrap());
     assert_eq!((get(&s, &old)["state"].as_str(), get(&s, &new)["state"].as_str()), (Some("live"), Some("live")));
 
