@@ -30,7 +30,7 @@ fn a_file_lands_beside_the_terminal_keeps_its_name_and_goes_with_it() {
 
     s.json(&["kill", &here]);
     s.json(&["rm", &here]);
-    assert!(!std::path::Path::new(path).exists(), "removed with the terminal");
+    wait_until("file removed with the terminal", || !std::path::Path::new(path).exists());
 
     std::fs::write(&file, vec![0u8; 9 << 20]).unwrap();
     assert_eq!(

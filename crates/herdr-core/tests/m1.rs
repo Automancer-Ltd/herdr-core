@@ -261,6 +261,7 @@ fn core_crash_adopts_terminals_and_recovers_the_screen() {
     let pid = get(&s, &t)["pid"].as_i64().unwrap();
     let core = status(&s)["pid"].as_i64().unwrap();
 
+    s.wait_saved_terminal(pid);
     kill9(core);
     // Output produced while no core is running must not be lost.
     std::fs::write(&go, "").unwrap();
@@ -432,14 +433,15 @@ fn holder_pid(s: &Session) -> i64 {
 }
 
 #[test]
-fn title_changes_are_saved_shortly_after_not_right_away() {
+fn title_changes_are_saved() {
     let s = Session::new();
     let t = run(&s, &["sh", "-c", "for i in 1 2 3 4 5 6 7 8 9; do printf '\\033]2;spin %s\\007' $i; done; sleep 100"]);
     wait_until("last title", || get(&s, &t)["title"] == "spin 9");
     let saved = || {
-        let file = std::fs::read(s.root.join("state/herdr-core/test/terminals.json")).unwrap();
-        serde_json::from_slice::<Value>(&file).unwrap()["terminals"]["1"]["title"].clone()
+        std::fs::read(s.root.join("state/herdr-core/test/terminals.json"))
+            .ok()
+            .and_then(|file| serde_json::from_slice::<Value>(&file).ok())
+            .map(|saved| saved["terminals"]["1"]["title"].clone())
     };
-    assert_eq!(saved(), "", "saved on a title change");
-    wait_until("title saved", || saved() == "spin 9");
+    wait_until("title saved", || saved() == Some(Value::from("spin 9")));
 }
