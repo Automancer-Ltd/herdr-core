@@ -15,8 +15,6 @@ const KEY_GAP: Duration = Duration::from_millis(30);
 pub const OUTPUT_SETTLE: Duration = Duration::from_millis(800);
 /// How long after start an agent may still be setting itself up.
 const STARTUP_MS: u64 = 10_000;
-/// The longest a send waits for a starting agent to settle.
-const SETTLE_MAX: Duration = Duration::from_secs(5);
 
 /// A person's typing, as it affects agent input to one terminal.
 #[derive(Default)]
@@ -157,7 +155,7 @@ impl Core {
         if let Some(t) = self.lock().reg.terminals.get(&id) {
             t.check_program()?;
         }
-        self.settle(id).await?;
+        self.settle(id).await;
         let (status, turn, reported) = self
             .type_in(id, quiet(), |st, t| {
                 let word = state_word(t);
@@ -215,8 +213,9 @@ impl Core {
     /// A starting agent can report before it is ready for a paste (Pi swaps its
     /// input box right after its first report and drops a paste in flight):
     /// in its first seconds, wait until its screen has been still a moment.
-    async fn settle(&self, id: u32) -> Result<(), RpcError> {
-        let deadline = Instant::now() + SETTLE_MAX;
+    /// The startup age bounds this wait; an earlier cutoff would drop a
+    /// template's first task while the agent was still drawing.
+    async fn settle(&self, id: u32) {
         loop {
             let ready = {
                 let st = self.lock();
@@ -231,14 +230,7 @@ impl Core {
                 })
             };
             if ready {
-                return Ok(());
-            }
-            if Instant::now() >= deadline {
-                return Err(RpcError::new(
-                    "unavailable",
-                    format!("{} is still starting: its output has not settled", crate::terminals::address(id)),
-                    format!("nothing was typed; check hc read {}, then retry", crate::terminals::address(id)),
-                ));
+                return;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
