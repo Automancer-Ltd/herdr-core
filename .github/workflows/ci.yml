@@ -14,10 +14,13 @@
 # variable (testing skill, rule 4), never a hard-coded label; the arm, macOS
 # and Windows jobs need a specific host and keep their specialist label.
 #
-# Cache rules: one pinned toolchain so caches survive
-# stable bumps; only master pushes save, so PR caches can't evict the ones
-# everybody restores; libghostty-vt's Zig build lives in the ghostty-vt
-# crate's OUT_DIR, kept with the workspace crates.
+# Cache rules: one pinned toolchain so caches survive stable bumps; only
+# master pushes save, so PR caches can't evict the ones everybody restores.
+# The keys are the triple-based ones upstream's master workflow saves
+# (matrix.target-dev), so a fork run restores those caches instead of building
+# from cold; the job id keeps one job's cache apart from another's.
+# libghostty-vt's Zig build lives in the ghostty-vt crate's OUT_DIR, kept with
+# the workspace crates.
 name: ci
 
 on:
@@ -81,16 +84,16 @@ jobs:
         env:
           ZIG: ${{ github.workspace }}/scripts/zig-stub.sh
 
+  # Linux tests the static musl build, which is what releases ship. macOS and
+  # Windows run in the extended suite below: their jobs cost minutes each, and
+  # the whole pull-request verdict must fit five.
+  #
+  # Two shards by measured need: a cold musl build is one to two minutes and
+  # the test binaries another two and a half, so one job sat on the five-minute
+  # cap (run 41312003743 was cancelled by it). The split is computed from
+  # crates/herdr-core/tests/*.rs, so a new test file always lands in exactly one
+  # shard rather than being silently skipped.
   test:
-    # Linux tests the static musl build, which is what releases ship. macOS and
-    # Windows run in the extended suite below: their jobs cost minutes each, and
-    # the whole pull-request verdict must fit five.
-    #
-    # Two shards by measured need: a cold musl build is 1-2 minutes and the test
-    # binaries another 2.5, so one job sat on the five-minute cap (run
-    # 41312003743 was cancelled by it). The split is computed from
-    # crates/herdr-core/tests/*.rs, so a new test file always lands in exactly
-    # one shard rather than being silently skipped.
     strategy:
       fail-fast: false
       matrix:
@@ -111,7 +114,7 @@ jobs:
           version: 0.16.0
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          key: linux-dev
+          key: x86_64-unknown-linux-musl-dev
           cache-workspace-crates: true
           cache-bin: false
           save-if: ${{ env.SAVE_CACHES }}
@@ -143,10 +146,14 @@ jobs:
       - run: '[ "${{ needs.lint.result }}" = success ] && [ "${{ needs.test.result }}" = success ]'
 
   # ---- the extended suite: workflow_dispatch only --------------------------
+  #
+  # These jobs are skipped on every pull request, so they cost nothing there.
+  # They save their caches on a dispatch: the extended suite is always started
+  # on a branch, and a branch's cache is restorable by that branch's next run.
 
   clippy-linux:
-    # clippy for the release target recompiles the workspace and is cold on a
-    # new toolchain, so it is checked on demand rather than on every change.
+    # clippy for the release target recompiles the workspace, so it is checked
+    # on demand rather than on every change.
     if: github.event_name == 'workflow_dispatch'
     runs-on: ${{ fromJSON(vars.CI_RUNNER || '"ubuntu-latest"') }}
     timeout-minutes: 10
@@ -165,24 +172,66 @@ jobs:
           version: 0.16.0
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          key: linux-dev # the test job's cache: same build
+          key: x86_64-unknown-linux-musl-dev # the test job's build
           cache-workspace-crates: true
           cache-bin: false
-          save-if: ${{ env.SAVE_CACHES }}
+          save-if: ${{ github.event_name == 'workflow_dispatch' }}
       - run: cargo clippy --locked --target x86_64-unknown-linux-musl --all-targets -- -D warnings
 
-  test-other-platforms:
+  test-macos:
+    # Two shards for the ten-minute cap: macOS is three cores, and one cold
+    # build plus the whole suite ran past nine minutes (run 41312705323).
     if: github.event_name == 'workflow_dispatch'
     strategy:
       fail-fast: false
-      # macOS (3 cores): fewer tests at once, so each one's terminals keep
-      # their timing. Windows: Unix tests skip themselves; tests/windows.rs
-      # runs instead.
       matrix:
-        include:
-          - { os: macos, runner: macos-15, target: aarch64-apple-darwin }
-          - { os: windows, runner: windows-2025, target: x86_64-pc-windows-msvc }
-    runs-on: ${{ matrix.runner }}
+        shard: [0, 1]
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: aarch64-apple-darwin
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.16.0
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: aarch64-apple-darwin-dev
+          cache-workspace-crates: true
+          cache-bin: false
+          save-if: ${{ github.event_name == 'workflow_dispatch' }}
+      # No clippy here: the same unix code is clippy-checked in clippy-linux
+      # and this build compiles every cfg(macos) line, while the macOS clippy
+      # pass cost four of the job's ten minutes.
+      #
+      # Full-screen scrolling tests are disabled on macOS CI because runner
+      # timing is unreliable, and the rest are split by test binary.
+      - name: Tests (including human docs)
+        shell: bash
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          only=()
+          i=0
+          for t in crates/herdr-core/tests/*.rs; do
+            name=$(basename "$t" .rs)
+            if [ "$name" != stitch ] && [ $((i % 2)) -eq "$SHARD" ]; then only+=(--test "$name"); fi
+            i=$((i+1))
+          done
+          if [ "$SHARD" = 0 ]; then only+=(--lib --bins); fi
+          cargo test --locked --no-fail-fast --target aarch64-apple-darwin \
+            "${only[@]}" -- --test-threads 2
+
+  test-windows:
+    # Windows: the Unix tests skip themselves; tests/windows.rs runs instead.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-2025
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -193,44 +242,29 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
-          targets: ${{ matrix.target }}
+          targets: x86_64-pc-windows-msvc
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: 0.16.0
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          key: ${{ matrix.os }}-dev
+          key: x86_64-pc-windows-msvc-dev
           cache-workspace-crates: true
           cache-bin: false
-          save-if: ${{ env.SAVE_CACHES }}
-      # Windows only: clippy-linux covers the shared unix code on every release,
-      # and the macOS suite compiles every cfg(macos) line, so a macOS clippy
-      # pass would spend four of the job's ten minutes on what those two cover.
-      - if: matrix.os == 'windows'
-        run: cargo clippy --locked --target ${{ matrix.target }} --all-targets -- -D warnings
+          save-if: ${{ github.event_name == 'workflow_dispatch' }}
+      - run: cargo clippy --locked --target x86_64-pc-windows-msvc --all-targets -- -D warnings
       # Windows' own ConPTY swallows answers to programs: hc ships Microsoft's.
-      - if: matrix.os == 'windows'
-        shell: pwsh
-        run: scripts/fetch-conpty.ps1 -Dest target/${{ matrix.target }}/debug
+      - shell: pwsh
+        run: scripts/fetch-conpty.ps1 -Dest target/x86_64-pc-windows-msvc/debug
       # cli_docs runs the built binary's help: generated reference freshness
       # and README/docs command/flag checks, with file:line failures.
       - name: Tests (including human docs)
         shell: bash
-        run: |
-          # Full-screen scrolling tests are disabled on macOS CI because runner timing is unreliable.
-          only=()
-          if [ "${{ matrix.os }}" = macos ]; then
-            for t in crates/herdr-core/tests/*.rs; do
-              name=$(basename "$t" .rs)
-              [ "$name" = stitch ] || only+=(--test "$name")
-            done
-            only+=(--lib --bins)
-          fi
-          cargo test --locked --no-fail-fast --target ${{ matrix.target }} "${only[@]}" -- --test-threads 2
+        run: cargo test --locked --no-fail-fast --target x86_64-pc-windows-msvc -- --test-threads 2
 
   upgrade:
     # Building the last release takes minutes: an update must never break
-    # running terminals, but the build does not belong in a pull-request
+    # running terminals, but that build does not belong in a pull-request
     # verdict.
     if: github.event_name == 'workflow_dispatch'
     runs-on: ${{ fromJSON(vars.CI_RUNNER || '"ubuntu-latest"') }}
@@ -249,7 +283,7 @@ jobs:
           version: 0.16.0
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          key: linux-dev # the test job's cache: same build
+          key: x86_64-unknown-linux-musl-dev # the test job's build
           cache-workspace-crates: true
           cache-bin: false
           save-if: false
