@@ -15,7 +15,7 @@ pub struct Foreground {
     /// Its name as the OS has it (`node`, `vim`, `sh`).
     pub name: String,
     pub argv: Vec<String>,
-    /// Its working directory now (resolved by the OS).
+    /// Its working directory now (resolved by the OS); empty when the OS keeps it private (another user's program).
     pub cwd: String,
 }
 
@@ -26,7 +26,8 @@ pub fn about(pid: i32) -> Option<Foreground> {
     let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
     let argv =
         cmdline.split(|b| *b == 0).filter(|a| !a.is_empty()).map(|a| String::from_utf8_lossy(a).into_owned()).collect();
-    let cwd = std::fs::read_link(format!("/proc/{pid}/cwd")).ok()?.display().to_string();
+    // Another user's folder is private (ptrace rules); its name and argv are not.
+    let cwd = std::fs::read_link(format!("/proc/{pid}/cwd")).map(|p| p.display().to_string()).unwrap_or_default();
     Some(Foreground { pid, name, argv, cwd })
 }
 
@@ -158,19 +159,25 @@ impl Core {
             tokio::time::sleep(Duration::from_millis(ms)).await;
             let live: Vec<u32> = self.lock().reg.terminals.values().filter(|t| t.is_live()).map(|t| t.id()).collect();
             for id in live {
-                let pgid = self.foreground(id).await;
-                let now = (pgid > 0).then(|| about(pgid)).flatten();
-                let mut st = self.lock();
-                let Some(t) = st.reg.terminals.get_mut(&id).filter(|t| t.is_live() && t.foreground != now) else {
-                    continue;
-                };
-                if let Some(f) = &now {
-                    t.last_cwd = Some(f.cwd.clone());
-                }
-                t.foreground = now.clone();
-                self.save_soon();
-                self.emit(&mut st, "foreground", id, serde_json::to_value(&now).unwrap_or_default());
+                self.refresh_foreground(id).await;
             }
         }
+    }
+
+    /// Reads terminal `id`'s foreground now. A holder that doesn't answer in
+    /// time leaves the last fact in place: it says nothing about the program.
+    pub async fn refresh_foreground(&self, id: u32) {
+        let Some(pgid) = self.ask_foreground(id).await else { return };
+        let now = (pgid > 0).then(|| about(pgid)).flatten();
+        let mut st = self.lock();
+        let Some(t) = st.reg.terminals.get_mut(&id).filter(|t| t.is_live() && t.foreground != now) else {
+            return;
+        };
+        if let Some(f) = now.as_ref().filter(|f| !f.cwd.is_empty()) {
+            t.last_cwd = Some(f.cwd.clone());
+        }
+        t.foreground = now.clone();
+        self.save_soon();
+        self.emit(&mut st, "foreground", id, serde_json::to_value(&now).unwrap_or_default());
     }
 }

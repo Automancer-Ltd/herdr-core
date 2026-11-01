@@ -274,6 +274,10 @@ async fn terminal_list(core: Ctx<'_>, p: ListParams) -> Result<ListResult, RpcEr
 
 async fn terminal_get(core: Ctx<'_>, p: TerminalParams) -> Result<Public, RpcError> {
     let id = resolve(core, &p.terminal)?;
+    // What runs now, not as of the last poll: a get right after a start sees it.
+    if core.lock().reg.terminals.get(&id).is_some_and(|t| t.is_live()) {
+        core.refresh_foreground(id).await;
+    }
     core.saw(p.caller.as_deref(), id);
     record(core, id).map(Public)
 }
