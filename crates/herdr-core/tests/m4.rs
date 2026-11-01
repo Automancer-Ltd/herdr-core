@@ -20,7 +20,18 @@ fn run(s: &Session, script: &str) -> String {
 }
 
 fn shows(s: &Session, t: &str, needle: &str) {
-    wait_until(&format!("{needle:?} in {t}"), || text(s, t).contains(needle));
+    let start = Instant::now();
+    loop {
+        let screen = text(s, t);
+        if screen.contains(needle) {
+            return;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "timed out waiting for {needle:?} in {t}; it shows:\n{screen}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 fn status(s: &Session, t: &str) -> Value {
