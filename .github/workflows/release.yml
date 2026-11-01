@@ -7,7 +7,10 @@ name: release
 
 on:
   push:
-    tags: ["v*"]
+    # The fork's `v<upstream>-automancer.<n>` tags mark which upstream release
+    # a fork release sits on; its builds come from workflow_dispatch and a tag
+    # run would only fail the version check below, so they never trigger one.
+    tags: ["v*", "!v*-automancer.*"]
   # Builds only; publishing needs a tag.
   workflow_dispatch:
 
