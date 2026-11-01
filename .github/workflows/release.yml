@@ -32,14 +32,19 @@ jobs:
       fail-fast: true
       matrix:
         include:
-          - { name: linux-x86_64, target: x86_64-unknown-linux-musl, runner: ubuntu-latest }
+          # Hosted x86_64 Linux takes the controller-owned CI_RUNNER variable
+          # (testing skill, rule 4). The rest need a specific host and keep
+          # their specialist label.
+          - { name: linux-x86_64, target: x86_64-unknown-linux-musl, runner: hosted }
           - { name: linux-aarch64, target: aarch64-unknown-linux-musl, runner: ubuntu-22.04-arm }
           - { name: macos-aarch64, target: aarch64-apple-darwin, runner: macos-15 }
           # Cross-build on Apple Silicon; verify the Intel binary under Rosetta.
           - { name: macos-x86_64, target: x86_64-apple-darwin, runner: macos-15 }
           - { name: windows-x86_64, target: x86_64-pc-windows-msvc, runner: windows-2025 }
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 45
+    runs-on: ${{ matrix.runner == 'hosted' && fromJSON(vars.CI_RUNNER || '"ubuntu-latest"') || matrix.runner }}
+    # A release build is an extended check: ten minutes (testing skill, rule 1).
+    # The slowest observed job is the macOS Intel cross-build at 7m58s.
+    timeout-minutes: 10
     defaults:
       run:
         shell: bash
@@ -114,7 +119,7 @@ jobs:
       && ((github.event_name == 'push' && github.ref_type == 'tag') || github.event_name == 'workflow_dispatch')
     environment: signing
     runs-on: windows-2025
-    timeout-minutes: 15
+    timeout-minutes: 10
     permissions:
       contents: read
       id-token: write
@@ -170,8 +175,8 @@ jobs:
       && github.event_name == 'push' && github.ref_type == 'tag' && github.triggering_actor == 'ogulcancelik'
     # The R2 keys live here, usable only from v* tags.
     environment: release
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+    runs-on: ${{ fromJSON(vars.CI_RUNNER || '"ubuntu-latest"') }}
+    timeout-minutes: 10
     env:
       AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
