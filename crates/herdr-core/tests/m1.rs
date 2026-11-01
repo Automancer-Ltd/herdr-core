@@ -372,6 +372,9 @@ fn a_turn_that_starts_and_ends_in_one_burst_survives_losing_the_holder() {
         printf '\033]7501;state=working\033\\\033]7501;state=done\033\\\033]7501;state=idle\033\\'; sleep 100";
     let t = run(&s, &["sh", "-c", burst]);
     wait_until("the turn", || get(&s, &t)["turn"] == 1);
+    // Saves happen off the core thread; the crash must come after the turn is on disk.
+    let pid = get(&s, &t)["pid"].as_i64().unwrap();
+    s.wait_saved(|r| r["pid"] == pid && r["turn"] == 1);
     let (core, holder) = (status(&s)["pid"].as_i64().unwrap(), holder_pid(&s));
     kill9(core);
     kill9(holder);
