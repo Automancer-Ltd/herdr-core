@@ -85,6 +85,16 @@ jobs:
     # Linux tests the static musl build, which is what releases ship. macOS and
     # Windows run in the extended suite below: their jobs cost minutes each, and
     # the whole pull-request verdict must fit five.
+    #
+    # Two shards by measured need: a cold musl build is 1-2 minutes and the test
+    # binaries another 2.5, so one job sat on the five-minute cap (run
+    # 41312003743 was cancelled by it). The split is computed from
+    # crates/herdr-core/tests/*.rs, so a new test file always lands in exactly
+    # one shard rather than being silently skipped.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1]
     runs-on: ${{ fromJSON(vars.CI_RUNNER || '"ubuntu-latest"') }}
     timeout-minutes: 5
     steps:
@@ -109,7 +119,19 @@ jobs:
       # and README/docs command/flag checks, with file:line failures.
       - name: Tests (including human docs)
         shell: bash
-        run: cargo test --locked --no-fail-fast --target x86_64-unknown-linux-musl -- --test-threads 2
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          tests=()
+          lib=()
+          i=0
+          for t in crates/herdr-core/tests/*.rs; do
+            if [ $((i % 2)) -eq "$SHARD" ]; then tests+=(--test "$(basename "$t" .rs)"); fi
+            i=$((i+1))
+          done
+          if [ "$SHARD" = 0 ]; then lib=(--lib --bins); fi
+          cargo test --locked --no-fail-fast --target x86_64-unknown-linux-musl \
+            "${lib[@]}" "${tests[@]}" -- --test-threads 2
 
   # The one check master's ruleset requires.
   ci-ok:
