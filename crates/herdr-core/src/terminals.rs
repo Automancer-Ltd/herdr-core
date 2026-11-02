@@ -218,6 +218,9 @@ pub struct Registry {
     /// The holder these terminals run under.
     pub holder: Option<String>,
     pub terminals: BTreeMap<u32, Terminal>,
+    /// The journal of changes since this file was written (`runtime::saved`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub journal: Option<String>,
 }
 
 #[derive(Default)]

@@ -202,11 +202,9 @@ fn a_core_crash_does_not_count_old_turns_twice() {
     assert_eq!(done["turn"], 1);
     assert!(done["status_ms"].as_u64().unwrap() >= done["created_ms"].as_u64().unwrap());
     wait_until("finished turn saved before simulated crash", || {
-        std::fs::read(s.root.join("state/herdr-core/test/terminals.json")).is_ok_and(|bytes| {
-            serde_json::from_slice::<Value>(&bytes).is_ok_and(|saved| {
-                let terminal = &saved["terminals"]["1"];
-                terminal["turn"] == done["turn"] && terminal["status_ms"] == done["status_ms"]
-            })
+        s.saved().is_some_and(|saved| {
+            let terminal = &saved["terminals"]["1"];
+            terminal["turn"] == done["turn"] && terminal["status_ms"] == done["status_ms"]
         })
     });
     let core = s.json(&["server", "status"])["pid"].as_i64().unwrap();

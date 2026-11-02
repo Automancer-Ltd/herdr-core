@@ -110,7 +110,7 @@ struct Identity {
 /// What a copy of another machine's disk must not bring along: that
 /// machine's terminals, screens, files, execs and the cores that dialed it.
 /// Kept: the machines it reaches and the clients' docs (settings, not life).
-const CLONE_FORGETS: &[&str] = &["terminals.json", "peers.json", "screens", "files", "execs"];
+const CLONE_FORGETS: &[&str] = &["terminals.json", "terminals.journal", "peers.json", "screens", "files", "execs"];
 
 /// Permanent core identity: created on first start, kept until state is
 /// wiped, or until the disk turns up under another machine id (a snapshot,
