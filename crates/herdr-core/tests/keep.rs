@@ -119,9 +119,9 @@ fn recovery_saves_only_client_overrides_and_refreshes_the_core_environment() {
     );
     let t = started["result"]["address"].as_str().unwrap();
     // Saved off the core lock, shortly after the call returns.
-    let path = s.root.join("state/herdr-core/test/terminals.json");
-    wait_until("terminals.json saved", || std::fs::read_to_string(&path).is_ok_and(|f| f.contains("HC_KEEP_OVERRIDE")));
-    let state = std::fs::read_to_string(&path).unwrap();
+    let saved = || s.saved().map(|v| v.to_string()).unwrap_or_default();
+    wait_until("terminals.json saved", || saved().contains("HC_KEEP_OVERRIDE"));
+    let state = saved();
     assert!(!state.contains("HC_KEEP_BASE") && !state.contains("old-secret"), "{state}");
     let state: serde_json::Value = serde_json::from_str(&state).unwrap();
     assert_eq!(
@@ -184,12 +184,7 @@ fn paused_replacement() -> (Session, String, PausedHolder) {
     let holder = PausedHolder(holder);
     // The claim comes after two failed tries' backoff (1.5 s + 3 s) and a 1 s tick:
     // about 5 s here, past wait_until's 10 s on a slow runner.
-    let claimed = || {
-        let state: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(s.root.join("state/herdr-core/test/terminals.json")).unwrap())
-                .unwrap();
-        state["terminals"]["1"]["holder"].is_string()
-    };
+    let claimed = || s.saved().unwrap()["terminals"]["1"]["holder"].is_string();
     let start = std::time::Instant::now();
     while !claimed() {
         assert!(start.elapsed() < std::time::Duration::from_secs(30), "timed out waiting for replacement claimed");

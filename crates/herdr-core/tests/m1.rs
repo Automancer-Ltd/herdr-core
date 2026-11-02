@@ -440,11 +440,6 @@ fn title_changes_are_saved() {
     let s = Session::new();
     let t = run(&s, &["sh", "-c", "for i in 1 2 3 4 5 6 7 8 9; do printf '\\033]2;spin %s\\007' $i; done; sleep 100"]);
     wait_until("last title", || get(&s, &t)["title"] == "spin 9");
-    let saved = || {
-        std::fs::read(s.root.join("state/herdr-core/test/terminals.json"))
-            .ok()
-            .and_then(|file| serde_json::from_slice::<Value>(&file).ok())
-            .map(|saved| saved["terminals"]["1"]["title"].clone())
-    };
+    let saved = || s.saved().map(|saved| saved["terminals"]["1"]["title"].clone());
     wait_until("title saved", || saved() == Some(Value::from("spin 9")));
 }

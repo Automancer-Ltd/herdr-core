@@ -67,15 +67,17 @@ impl Session {
         self.wait_saved(|t| t["pid"] == pid);
     }
 
-    /// Waits until terminals.json on disk holds a terminal record matching `want`.
+    /// Waits until the saved registry holds a terminal record matching `want`.
     pub fn wait_saved(&self, want: impl Fn(&Value) -> bool) {
-        let path = self.root.join("state/herdr-core/test/terminals.json");
         wait_until("terminal saved before simulated crash", || {
-            std::fs::read(&path).is_ok_and(|bytes| {
-                serde_json::from_slice::<Value>(&bytes)
-                    .is_ok_and(|saved| saved["terminals"].as_object().is_some_and(|ts| ts.values().any(&want)))
-            })
+            self.saved().is_some_and(|saved| saved["terminals"].as_object().is_some_and(|ts| ts.values().any(&want)))
         });
+    }
+
+    /// The registry on disk as the next start reads it (terminals.json and its journal).
+    pub fn saved(&self) -> Option<Value> {
+        let reg = herdr_core::runtime::saved::load(&self.root.join("state/herdr-core/test/terminals.json")).ok()?;
+        Some(serde_json::json!({"next_id": reg.next_id, "holder": reg.holder, "terminals": reg.terminals}))
     }
 
     /// Any program with this session's environment (its HOME, XDG dirs, env).

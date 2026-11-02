@@ -4,7 +4,7 @@
 use crate::api::CoreInfo;
 use crate::holder_proto::{self as proto, Exit, Goodbye};
 use crate::paths::Paths;
-use crate::paths::{read_state, write_atomic};
+use crate::paths::read_state;
 use crate::platform::{self, Stream as UnixStream, signal};
 use crate::relay::Relay;
 use crate::terminals::Registry;
@@ -12,9 +12,8 @@ use crate::viewers::Viewer;
 use ghostty_vt::Terminal as Screen;
 use std::collections::{HashMap, HashSet};
 use std::io;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicU64;
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, mpsc};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, MutexGuard, mpsc};
 use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::{Notify, oneshot};
 
@@ -151,7 +150,7 @@ fn finish_reason(killed: bool, stopping: bool, host_shutdown: bool) -> &'static 
 
 impl Core {
     pub fn start(paths: Paths, info: CoreInfo) -> io::Result<Arc<Core>> {
-        let reg: Registry = read_state(&paths.state.join("terminals.json"))?;
+        let reg = saved::load(&paths.state.join("terminals.json"))?;
         let docs_path = paths.state.join("docs.json");
         let docs = read_state(&docs_path).unwrap_or_else(|e| {
             eprintln!("core: cannot load documents, starting empty: {e}");
@@ -206,26 +205,17 @@ impl Core {
     }
 
     /// Queues the registry for the background writer: callers hold the lock, and an fsync on a stalled disk took
-    /// seconds with every RPC waiting behind it (Automancer, 31 Oct 2026). The newest registry wins.
+    /// seconds with every RPC waiting behind it (Automancer, 31 Oct 2026). The newest registry wins; only the
+    /// terminals that changed reach the disk (`saved`).
     pub fn save(&self, st: &State) {
         self.dirty.store(false, std::sync::atomic::Ordering::SeqCst);
-        let bytes = serde_json::to_vec(&st.reg).expect("registry serializes");
-        static START: std::sync::Once = std::sync::Once::new();
-        START.call_once(|| {
-            std::thread::Builder::new().name("hc-save".into()).spawn(writer).expect("save thread starts");
-        });
-        let generation = WRITES.next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        *WRITES.pending.lock().unwrap_or_else(|p| p.into_inner()) =
-            Some((generation, self.paths.state.join("terminals.json"), bytes));
-        WRITES.ready.notify_one();
+        saved::queue(self.paths.state.join("terminals.json"), saved::Saved::of(&st.reg));
     }
 
-    /// Written before it returns, for a restart or stop that reads it next; `sync` waits for the disk too.
+    /// Written whole before it returns, for a restart or stop that reads it next; `sync` waits for the disk too.
     pub fn save_now(&self, st: &State, sync: bool) {
         self.dirty.store(false, std::sync::atomic::Ordering::SeqCst);
-        let bytes = serde_json::to_vec(&st.reg).expect("registry serializes");
-        let generation = WRITES.next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        write_newest(generation, &self.paths.state.join("terminals.json"), &bytes, sync);
+        saved::fold_now(&self.paths.state.join("terminals.json"), saved::Saved::of(&st.reg), sync);
     }
 
     /// For frequent changes a crash may lose (the next start rebuilds them):
@@ -803,59 +793,9 @@ impl Core {
     }
 }
 
-/// The registry writes waiting for the `hc-save` thread, and the newest generation on disk.
-struct Writes {
-    pending: Mutex<Option<(u64, PathBuf, Vec<u8>)>>,
-    ready: Condvar,
-    written: Mutex<u64>,
-    next: AtomicU64,
-}
-
-static WRITES: Writes =
-    Writes { pending: Mutex::new(None), ready: Condvar::new(), written: Mutex::new(0), next: AtomicU64::new(1) };
-
-/// Writes unless a newer generation is already on disk, so a late older write never replaces a newer one.
-fn write_newest(generation: u64, path: &Path, bytes: &[u8], sync: bool) {
-    let mut written = WRITES.written.lock().unwrap_or_else(|p| p.into_inner());
-    if generation <= *written {
-        return;
-    }
-    let wrote = if sync { write_atomic(path, bytes) } else { crate::paths::write_replace(path, bytes) };
-    match wrote {
-        Ok(()) => *written = generation,
-        Err(e) => eprintln!("core: cannot save terminals: {e}"),
-    }
-}
-
-/// Waits (up to 10 s) until the newest registry save has reached the disk: `hc-save` takes a write off the queue
-/// before it writes it, so an empty queue alone does not mean the write finished. Tests call it before removing
-/// their state folder.
+pub mod saved;
 #[cfg(test)]
-pub fn flush_saves() {
-    let until = Instant::now() + Duration::from_secs(10);
-    while Instant::now() < until {
-        let issued = WRITES.next.load(std::sync::atomic::Ordering::SeqCst) - 1;
-        if *WRITES.written.lock().unwrap_or_else(|p| p.into_inner()) >= issued {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-}
-
-fn writer() {
-    loop {
-        let (generation, path, bytes) = {
-            let mut pending = WRITES.pending.lock().unwrap_or_else(|p| p.into_inner());
-            loop {
-                if let Some(next) = pending.take() {
-                    break next;
-                }
-                pending = WRITES.ready.wait(pending).unwrap_or_else(|p| p.into_inner());
-            }
-        };
-        write_newest(generation, &path, &bytes, true);
-    }
-}
+pub use saved::flush_saves;
 
 #[cfg(test)]
 mod tests;
