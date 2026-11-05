@@ -165,6 +165,10 @@ fn the_build_is_named_by_the_linkers_build_id() {
 }
 
 pub fn spawn_core(paths: &Paths) -> Result<(), RpcError> {
+    #[cfg(target_os = "macos")]
+    if platform::start_core_by_launch_agent() {
+        return Ok(());
+    }
     spawn_detached(paths, &["serve"], "core.log").map_err(|e| unavailable(format!("cannot start core: {e}")))
 }
 

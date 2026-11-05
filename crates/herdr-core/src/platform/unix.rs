@@ -117,6 +117,28 @@ pub fn file_identity(m: &std::fs::Metadata) -> String {
 
 // --- Processes -------------------------------------------------------------
 
+/// macOS, from an ssh login (a remote machine's `connect`, an ssh `hc`, a holder an ssh-started core began):
+/// asks the launch agent `uk.automancer.herdr-core` to start the default core, so it runs in the GUI login,
+/// where programs can read the login keychain. Started straight from ssh it runs in the ssh login, where
+/// keychain logins such as gh's fail; after an update a remote `connect` usually wins the restart (t15120).
+/// False when there is no such agent or the core is an isolated one: then the caller starts it itself.
+#[cfg(target_os = "macos")]
+pub fn start_core_by_launch_agent() -> bool {
+    let set = |k: &&str| std::env::var_os(k).is_some_and(|v| !v.is_empty());
+    let isolated = ["HC_SESSION", "HC_SOCKET", "XDG_STATE_HOME"].iter().any(set);
+    if isolated || !super::SSH_LOGIN.iter().any(set) {
+        return false;
+    }
+    let job = format!("gui/{}/uk.automancer.herdr-core", unsafe { libc::getuid() });
+    Command::new("/bin/launchctl")
+        .args(["kickstart", &job])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
 /// Starts `cmd` in its own session (ending the terminal it was started from
 /// won't end it), stdin/stdout to /dev/null, stderr to `log`.
 pub fn spawn_detached(mut cmd: Command, log: std::fs::File) -> io::Result<()> {
