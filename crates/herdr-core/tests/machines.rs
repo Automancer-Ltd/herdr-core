@@ -26,6 +26,315 @@ fn a_machine_is_added_renamed_kept_and_forgotten() {
 }
 
 #[test]
+fn long_host_labels_get_short_names_and_numbered_collisions() {
+    let first = Session::new();
+    let second = Session::new();
+    let third = Session::new();
+    let mut s = Session::new();
+    s.env.push(fake_ssh(&s, &[("node-07", &first), ("node-08", &second), ("node-09", &third)]));
+    for (host, expected) in [
+        ("alice@build-runner-staging-eu-west-3-node-07.example.com", "build-runner-staging-eu-west-3-n"),
+        ("alice@build-runner-staging-eu-west-3-node-08.example.com", "build-runner-staging-eu-west-3-2"),
+        ("alice@build-runner-staging-eu-west-3-node-09.example.com", "build-runner-staging-eu-west-3-3"),
+    ] {
+        let added = s.json(&["machine", "add", host, "--session", "test"]);
+        assert_eq!(added["name"], expected, "{added}");
+        assert_eq!(added["target"], host, "the connection target is never truncated");
+        assert_eq!(added["session"], "test");
+    }
+    assert_eq!(s.json(&["machine", "ls"])["machines"].as_array().unwrap().len(), 3);
+    let (_, error) = s.err(&["--json", "machine", "add", "other", "--name", "build-runner-staging-eu-west-3-n"]);
+    assert_eq!(error["error"]["kind"], "name_taken", "explicit names still reject collisions");
+}
+
+#[test]
+fn concurrent_machine_adds_allocate_names_from_the_registered_machines() {
+    let first = Session::new();
+    let second = Session::new();
+    let mut s = Session::new();
+    let (_, ssh) = fake_ssh(&s, &[("node-07", &first), ("node-08", &second)]);
+    let gate = s.root.join("gated-ssh");
+    std::fs::write(
+        &gate,
+        format!(
+            "#!/bin/sh\ntouch {root}/\"$1\"\nwhile [ ! -e {root}/release ]; do sleep 0.02; done\nexec {ssh} \"$@\"\n",
+            root = s.root.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&gate, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    s.env.push(("HC_SSH".into(), gate.display().to_string()));
+    let hosts = ["build-runner-staging-eu-west-3-node-07", "build-runner-staging-eu-west-3-node-08"];
+    let children: Vec<_> = hosts
+        .iter()
+        .map(|host| {
+            s.cmd()
+                .args(["--json", "machine", "add", host])
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap()
+        })
+        .collect();
+    wait_until("both adds connecting", || hosts.iter().all(|host| s.root.join(host).exists()));
+    touch(&s, "release");
+    let mut names: Vec<_> = children
+        .into_iter()
+        .map(|child| {
+            let out = child.wait_with_output().unwrap();
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+            serde_json::from_slice::<serde_json::Value>(&out.stdout).unwrap()["name"].as_str().unwrap().to_string()
+        })
+        .collect();
+    names.sort();
+    assert_eq!(names, ["build-runner-staging-eu-west-3-2", "build-runner-staging-eu-west-3-n"]);
+}
+
+#[test]
+fn a_windows_shell_with_sh_on_path_retries_the_native_line() {
+    let rohan = Session::new();
+    let mut s = Session::new();
+    let (_, ssh) = fake_ssh(&s, &[("rohan", &rohan)]);
+    let wrapper = s.root.join("msys-ssh");
+    std::fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\ncase \"$2\" in sh\\ *) exit 0;; esac\nexec {ssh} rohan '{} connect'\n",
+            rohan.bin.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&wrapper, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    s.env.push(("HC_SSH".into(), wrapper.display().to_string()));
+    let peer = rohan.json(&["server", "status"])["core"]["id"].clone();
+    let added = s.json(&["machine", "add", "windows-msys"]);
+    assert_eq!(added["id"], peer, "{added}");
+    s.json(&["machine", "rm", "windows-msys"]);
+}
+
+#[test]
+fn powershell_with_git_sh_retries_after_a_mangled_script() {
+    let rohan = Session::new();
+    let mut s = Session::new();
+    let (_, ssh) = fake_ssh(&s, &[("rohan", &rohan)]);
+    let wrapper = s.root.join("powershell-ssh");
+    std::fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\ncase \"$2\" in sh\\ *) echo \"is: -c: line 2: syntax error: unexpected end of file from '{{' command on line 1\" >&2; exit 2;; esac\nexec {ssh} rohan '{} connect'\n",
+            rohan.bin.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&wrapper, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    s.env.push(("HC_SSH".into(), wrapper.display().to_string()));
+    let added = s.json(&["machine", "add", "windows-powershell"]);
+    assert_eq!(added["id"], rohan.json(&["server", "status"])["core"]["id"], "{added}");
+    s.json(&["machine", "rm", "windows-powershell"]);
+}
+
+#[test]
+fn localized_windows_shells_connect_to_an_installed_core() {
+    for (error, code) in [
+        ("'sh' 不是內部或外部命令、可執行的程式或批次檔。", 9009),
+        ("sh : 無法辨識 'sh' 詞彙是否為 Cmdlet、函數、指令檔或可執行程式的名稱。", 1),
+        ("Der Befehl 'sh' ist entweder falsch geschrieben oder konnte nicht gefunden werden.", 9009),
+    ] {
+        let rohan = Session::new();
+        let mut s = Session::new();
+        let (_, ssh) = fake_ssh(&s, &[("rohan", &rohan)]);
+        let wrapper = s.root.join("localized-ssh");
+        std::fs::write(
+            &wrapper,
+            format!(
+                "#!/bin/sh\ncase \"$2\" in sh\\ *) cat >&2 <<'ERROR'\n{error}\nERROR\nexit {code};; esac\nexec {ssh} rohan '{} connect'\n",
+                rohan.bin.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&wrapper, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        s.env.push(("HC_SSH".into(), wrapper.display().to_string()));
+        let added = s.json(&["machine", "add", "localized-windows"]);
+        assert_eq!(added["id"], rohan.json(&["server", "status"])["core"]["id"], "{added}");
+        s.json(&["machine", "rm", "localized-windows"]);
+    }
+}
+
+#[test]
+fn a_missing_unix_core_does_not_try_the_windows_line() {
+    let mut s = Session::new();
+    let wrapper = s.root.join("missing-unix-ssh");
+    let calls = s.root.join("calls");
+    std::fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\necho call >> '{}'\necho 'herdr-core is not installed here' >&2\nexit 127\n",
+            calls.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&wrapper, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    s.env.push(("HC_SSH".into(), wrapper.display().to_string()));
+    let (_, missing) = s.err(&["--json", "machine", "add", "unix-no-core"]);
+    assert_eq!(missing["error"]["kind"], "hc_missing", "{missing}");
+    assert_eq!(std::fs::read_to_string(calls).unwrap(), "call\n");
+}
+
+#[test]
+fn an_ssh_connection_failure_does_not_try_the_windows_line() {
+    for via in [false, true] {
+        let mut s = Session::new();
+        let wrapper = s.root.join("offline-ssh");
+        let calls = s.root.join("calls");
+        std::fs::write(
+            &wrapper,
+            format!("#!/bin/sh\necho call >> '{}'\necho 'Connection timed out' >&2\nexit 255\n", calls.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&wrapper, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let wrapper = wrapper.display().to_string();
+        let args = if via {
+            vec!["--json", "machine", "add", "--via", &wrapper, "--name", "offline"]
+        } else {
+            s.env.push(("HC_SSH".into(), wrapper.clone()));
+            vec!["--json", "machine", "add", "offline"]
+        };
+        let (_, error) = s.err(&args);
+        assert_eq!(error["error"]["kind"], "unreachable", "{error}");
+        assert!(error["error"]["message"].as_str().unwrap().ends_with("Connection timed out"), "{error}");
+        assert_eq!(std::fs::read_to_string(calls).unwrap(), "call\n", "via={via}: dial only once");
+    }
+}
+
+#[test]
+fn a_windows_probe_keeps_a_native_protocol_mismatch() {
+    let mut s = Session::new();
+    let wrapper = s.root.join("incompatible-ssh");
+    std::fs::write(&wrapper, "#!/bin/sh\ncase \"$2\" in sh\\ *) exit 0;; esac\nprintf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"data\":{\"kind\":\"unsupported_generation\"}}}'\n").unwrap();
+    std::fs::set_permissions(&wrapper, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    s.env.push(("HC_SSH".into(), wrapper.display().to_string()));
+    let (_, error) = s.err(&["--json", "machine", "add", "old-windows"]);
+    assert_eq!(error["error"]["kind"], "incompatible", "{error}");
+}
+
+#[test]
+fn a_windows_probe_keeps_native_core_errors() {
+    let mut s = Session::new();
+    let wrapper = s.root.join("unavailable-ssh");
+    std::fs::write(&wrapper, "#!/bin/sh\ncase \"$2\" in sh\\ *) exit 0;; esac\nprintf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"message\":\"native startup failed\",\"data\":{\"kind\":\"unavailable\"}}}'\n").unwrap();
+    std::fs::set_permissions(&wrapper, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    s.env.push(("HC_SSH".into(), wrapper.display().to_string()));
+    let (_, error) = s.err(&["--json", "machine", "add", "unavailable-windows"]);
+    assert_eq!(error["error"]["kind"], "unavailable", "{error}");
+    assert_eq!(error["error"]["message"], "native startup failed", "{error}");
+}
+
+#[test]
+fn a_windows_machine_with_git_sh_installs_the_native_build_when_missing() {
+    for (uname, sh_error, sh_code, missing_error) in [
+        ("MINGW64_NT-10.0 x86_64", "", 0, "is not recognized"),
+        ("MSYS_NT-10.0 x86_64", "", 0, "is not recognized"),
+        ("", "'sh' 不是內部或外部命令、可執行的程式或批次檔。", 9009, "系統找不到指定的路徑。"),
+        ("", "sh : 無法辨識 'sh' 詞彙是否為 Cmdlet、函數、指令檔或可執行程式的名稱。", 1, "系統找不到指定的路徑。"),
+        (
+            "",
+            "Der Befehl 'sh' konnte nicht gefunden werden.",
+            9009,
+            "Das System kann den angegebenen Pfad nicht finden.",
+        ),
+    ] {
+        let rohan = Session::new();
+        let mut s = Session::new();
+        let (_, ssh) = fake_ssh(&s, &[("rohan", &rohan)]);
+        let bin = s.root.join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let releases = s.root.join(format!("releases/core/{}", env!("CARGO_PKG_VERSION")));
+        std::fs::create_dir_all(&releases).unwrap();
+        std::fs::write(releases.join("windows.zip"), b"windows test build").unwrap();
+        std::fs::write(
+            releases.join("manifest.json"),
+            json!({
+                "version": env!("CARGO_PKG_VERSION"), "generation": 1,
+                "targets": {"windows-x86_64": {
+                    "url": format!("file://{}/windows.zip", releases.display()),
+                    "sha256": "2ab258378fc8f9fb3de76603fe051843b98403eb35246087e05a6912ab85b88d"
+                }}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let wrapper = bin.join("ssh");
+        std::fs::write(&wrapper, format!(r#"#!/bin/sh
+case "$2" in
+  sh\ *) cat >&2 <<'ERROR'
+{sh_error}
+ERROR
+    exit {sh_code};;
+  'uname -sm') [ -n '{uname}' ] || {{ echo '無法辨識 uname' >&2; exit 1; }}; echo '{uname}'; exit 0;;
+  'cmd /d /c "echo herdr-core-windows"') echo herdr-core-windows; exit 0;;
+  powershell\ *) [ -f '{root}/copied' ] || exit 1; touch '{root}/installed'; exit 0;;
+  *--version) echo 'herdr-core test'; exit 0;;
+esac
+if [ ! -f '{root}/installed' ]; then
+  case "$2" in
+    'cmd /d /c '*"if exist "*"herdr-core is not installed here"*"exit /b 127"*) echo 'herdr-core is not installed here' >&2; exit 127;;
+  esac
+  echo '{missing_error}' >&2
+  exit 1
+fi
+exec {ssh} rohan '{core} connect'
+"#, root = s.root.display(), core = rohan.bin.display())).unwrap();
+        let scp = bin.join("scp");
+        std::fs::write(
+            &scp,
+            format!(
+                r#"#!/bin/sh
+for arg do
+  case "$arg" in
+    */hc-install.zip) [ "$(cat "$arg")" = 'windows test build' ] || exit 1; zip=yes;;
+    */hc-install.ps1) [ -s "$arg" ] || exit 1; script=yes;;
+  esac
+done
+[ "$zip:$script" = yes:yes ] || exit 1
+touch '{root}/copied'
+"#,
+                root = s.root.display()
+            ),
+        )
+        .unwrap();
+        for file in [&wrapper, &scp] {
+            std::fs::set_permissions(file, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        }
+        s.env.push(("PATH".into(), format!("{}:{}", bin.display(), std::env::var("PATH").unwrap())));
+        s.env.push(("HC_SSH".into(), wrapper.display().to_string()));
+        s.env.push(("HERDR_RELEASES_URL".into(), format!("file://{}", s.root.join("releases").display())));
+        let (_, missing) = s.err(&["--json", "machine", "add", "windows-msys"]);
+        assert_eq!(missing["error"]["kind"], "hc_missing", "{missing}");
+        let added = s.json(&["machine", "add", "windows-msys", "--install"]);
+        assert_eq!(added["id"], rohan.json(&["server", "status"])["core"]["id"], "{added}");
+        assert!(s.root.join("installed").exists(), "the native installer ran");
+        s.json(&["machine", "rm", "windows-msys"]);
+    }
+}
+
+#[test]
+fn a_failed_windows_probe_keeps_the_original_posix_error() {
+    let mut s = Session::new();
+    let wrapper = s.root.join("closed-ssh");
+    std::fs::write(
+        &wrapper,
+        "#!/bin/sh\ncase \"$2\" in sh\\ *) exit 0;; esac\necho 'Windows retry error' >&2; exit 1\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&wrapper, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    s.env.push(("HC_SSH".into(), wrapper.display().to_string()));
+    let (_, error) = s.err(&["--json", "machine", "add", "posix"]);
+    assert_eq!(error["error"]["kind"], "unreachable", "{error}");
+    assert!(error["error"]["message"].as_str().unwrap().ends_with("the connection closed"), "{error}");
+    assert!(!error.to_string().contains("Windows retry error"), "{error}");
+}
+
+#[test]
 fn a_machine_shows_the_version_its_line_last_saw() {
     // Updated there since it was added (hc machine update, or by hand).
     let rohan = Session::new();
@@ -170,7 +479,7 @@ fn adding_says_what_went_wrong_and_saves_nothing() {
     assert_eq!(down["error"]["kind"], "unreachable");
     assert!(down["error"]["message"].as_str().unwrap().contains("Could not resolve"), "{down}");
     assert_eq!(kind(&["add", "self"]), "invalid_params");
-    assert_eq!(kind(&["add", "rohan"]), "name_taken");
+    assert_eq!(kind(&["add", "rohan"]), "already_added");
     assert_eq!(kind(&["add", "rohan", "--name", "again"]), "already_added");
     // The same core reached at another address: a copy of rohan's disk.
     let (_, copy) = s.err(&["--json", "machine", "add", "can@rohan-copy", "--name", "copy"]);

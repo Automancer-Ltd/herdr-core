@@ -19,12 +19,12 @@ pub fn remember_exe() {
     build_id();
 }
 
-/// The package manager this hc came from (`homebrew`, `nix`, `mise`), by
-/// where its binary lives; none for a plain install. They update it, not hc.
+/// The package manager this hc came from, or "system package manager" as a
+/// compatibility marker when its folder isn't writable. None for a replaceable install.
 pub fn installed_by() -> Option<&'static str> {
     let exe = EXE.get().cloned().or_else(|| std::env::current_exe().ok())?;
-    let path = exe.canonicalize().unwrap_or(exe).display().to_string();
-    manager_of(&path)
+    let path = exe.canonicalize().unwrap_or(exe);
+    manager_of(&path.to_string_lossy()).or_else(|| (!platform::can_replace(&path)).then_some("system package manager"))
 }
 
 fn manager_of(path: &str) -> Option<&'static str> {

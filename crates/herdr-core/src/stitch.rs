@@ -208,7 +208,9 @@ impl Core {
         }
         if st.screens.contains_key(&id) {
             let paint = crate::viewers::first_paint(&st, id, 0);
-            for v in st.viewers.get(&id).into_iter().flatten() {
+            let recovering = st.screens[&id].continuation().is_none();
+            for v in st.viewers.get_mut(&id).into_iter().flatten() {
+                v.recovering = recovering;
                 v.conn.with(|out| {
                     out.data(v.channel, &paint);
                 });

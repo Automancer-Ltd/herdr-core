@@ -13,6 +13,16 @@ use std::process::{Child, Command, Stdio};
 pub type Stream = std::os::unix::net::UnixStream;
 pub type Listener = std::os::unix::net::UnixListener;
 
+/// Replacing a binary needs write and search permission on its folder, not
+/// write permission on the binary itself.
+pub fn can_replace(path: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let Some(dir) = path.parent().and_then(|p| std::ffi::CString::new(p.as_os_str().as_bytes()).ok()) else {
+        return false;
+    };
+    unsafe { libc::access(dir.as_ptr(), libc::W_OK | libc::X_OK) == 0 }
+}
+
 pub fn connect(path: &Path) -> io::Result<Stream> {
     Stream::connect(path)
 }
@@ -179,7 +189,8 @@ pub fn exit_signal(status: &std::process::ExitStatus) -> Option<i32> {
 
 /// This machine's own shell, as a person here gets it.
 pub fn own_shell() -> Vec<String> {
-    vec![std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/sh".into())]
+    let shell = std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/sh".into());
+    if cfg!(target_os = "macos") { vec![shell, "-l".into()] } else { vec![shell] }
 }
 
 /// A shell line as this machine runs one.

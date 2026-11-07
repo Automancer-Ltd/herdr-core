@@ -33,6 +33,8 @@ pub struct Viewer {
     /// None: not active since it came back after a dropped line.
     active_at: Option<Instant>,
     display: Display,
+    /// An unfinished sequence exceeded continuation tracking; skip its tail.
+    pub(crate) recovering: bool,
 }
 
 fn rgb(hex: &Option<String>) -> Option<Rgb> {
@@ -64,6 +66,7 @@ impl Core {
             ));
         }
         let channel = conn.new_channel();
+        let recovering = st.screens[&id].continuation().is_none();
         st.viewers.entry(id).or_default().push(Viewer {
             conn: conn.clone(),
             channel,
@@ -71,6 +74,7 @@ impl Core {
             size: req.size,
             active_at: (!req.resumed).then(Instant::now),
             display: req.display,
+            recovering,
         });
         self.apply_size(&mut st, id);
         let paint = first_paint(&st, id, req.history);
@@ -96,7 +100,9 @@ impl Core {
         let holder = holders.iter().find(|l| Some(&l.instance) == instance.as_ref());
         let Some(screen) = screens.get_mut(&id) else { return };
         let relay = relays.entry(id).or_default();
-        let out = relay.feed(screen, bytes);
+        let recovering = viewers.get(&id).into_iter().flatten().any(|v| v.recovering);
+        let (out, recovered) =
+            if recovering { relay.feed_to_ground(screen, bytes) } else { (relay.feed(screen, bytes), None) };
         let win32_input = relay.win32_input.take();
         if let Some(watchers) = output_watch.get_mut(&id).filter(|_| !scrolling) {
             watchers.retain(|w| w.send(out.clone()).is_ok());
@@ -107,14 +113,6 @@ impl Core {
         let reports = screen.take_status_reports();
         let title = screen.take_title_changed().then(|| screen.title());
         let full_screen = screen.alt_screen();
-        let mut behind = Vec::new();
-        for v in viewers.get(&id).into_iter().flatten().filter(|_| !scrolling) {
-            v.conn.with(|ob| {
-                if !ob.data(v.channel, &out) {
-                    behind.push((v.conn.clone(), v.channel));
-                }
-            });
-        }
         // Before any repaint below, so it carries the mode this output just set.
         if let Some(on) = win32_input
             && let Some(t) = st.reg.terminals.get_mut(&id).filter(|t| t.win32_input != on)
@@ -122,11 +120,37 @@ impl Core {
             t.win32_input = on;
             self.save(st);
         }
-        for (conn, channel) in behind {
-            let paint = first_paint(st, id, 0); // too far behind: start over from now
-            conn.with(|ob| {
-                ob.data(channel, &paint);
+        let recovered = recovered.map(|(at, paint)| {
+            let mut paint = paint_state(st, id, paint);
+            paint.extend_from_slice(&out[at..]);
+            paint
+        });
+        let mut behind = Vec::new();
+        for (index, v) in st.viewers.get_mut(&id).into_iter().flatten().enumerate().filter(|_| !scrolling) {
+            let bytes = if v.recovering {
+                let Some(paint) = &recovered else { continue };
+                v.recovering = false;
+                paint
+            } else {
+                &out
+            };
+            v.conn.with(|ob| {
+                if !ob.data(v.channel, bytes) {
+                    behind.push(index);
+                }
             });
+        }
+        if !behind.is_empty() {
+            let paint = first_paint(st, id, 0);
+            let recovering = st.screens[&id].continuation().is_none();
+            let viewers = st.viewers.get_mut(&id).expect("viewers with queued output");
+            for index in behind {
+                let v = &mut viewers[index];
+                v.recovering = recovering;
+                v.conn.with(|ob| {
+                    ob.data(v.channel, &paint);
+                });
+            }
         }
         if full_screen && let Some(t) = st.reg.terminals.get_mut(&id) {
             t.full_screen = true;
@@ -219,7 +243,20 @@ impl Core {
 
     pub fn viewer_facts(&self, conn: &Arc<Conn>, channel: u32, display: Display) {
         let mut st = self.lock();
-        self.touch(&mut st, conn, channel, |v| v.display = display);
+        let Some((id, v)) = Self::viewer(&mut st, conn, channel) else { return };
+        v.display.fg = display.fg.or(v.display.fg.take());
+        v.display.bg = display.bg.or(v.display.bg.take());
+        v.display.cursor = display.cursor.or(v.display.cursor.take());
+        v.display.cell = display.cell.or(v.display.cell);
+        let display = st.viewers[&id]
+            .iter()
+            .filter(|v| !v.observe)
+            .max_by_key(|v| v.active_at)
+            .filter(|v| Arc::ptr_eq(&v.conn, conn) && v.channel == channel)
+            .map(|v| v.display.clone());
+        if let Some(display) = display {
+            self.apply_display(&mut st, id, Some(&display));
+        }
     }
 
     /// Focus changes count as activity, and reach programs that asked for them.
@@ -262,15 +299,15 @@ impl Core {
         let leader = st.viewers.get(&id).and_then(|vs| vs.iter().filter(|v| !v.observe).max_by_key(|v| v.active_at));
         let (cols, rows) = leader.map_or_else(|| self.headless(), |v| v.size);
         let display = leader.map(|v| v.display.clone());
-        let Some(screen) = st.screens.get_mut(&id) else { return };
-        if let Some(d) = display {
-            screen.set_display(rgb(&d.fg), rgb(&d.bg), rgb(&d.cursor), d.cell.map(|[w, h]| (w, h)));
+        if !st.screens.contains_key(&id) {
+            return;
         }
+        self.apply_display(st, id, display.as_ref());
         let rec = st.reg.terminals.get_mut(&id).expect("live terminal");
         if (rec.cols, rec.rows) == (cols, rows) || cols == 0 || rows == 0 {
             return;
         }
-        screen.resize(cols, rows);
+        st.screens.get_mut(&id).expect("live screen").resize(cols, rows);
         rec.cols = cols;
         rec.rows = rows;
         if let Some(link) = st.link(id) {
@@ -279,6 +316,18 @@ impl Core {
         self.save_soon();
         self.emit(st, "size", id, serde_json::json!({"cols": cols, "rows": rows}));
     }
+
+    fn apply_display(&self, st: &mut State, id: u32, display: Option<&Display>) {
+        let Some(screen) = st.screens.get_mut(&id) else { return };
+        if let Some(d) = display {
+            screen.set_display(rgb(&d.fg), rgb(&d.bg), rgb(&d.cursor), d.cell.map(|[w, h]| (w, h)));
+        }
+        // Display changes can notify an idle program, even without a resize or output.
+        let replies = Relay::take_responses(screen);
+        if let Some(link) = st.link(id) {
+            link.input(id, &replies);
+        }
+    }
 }
 
 /// The screen, then the latest 7501 report of every record and whether the
@@ -286,7 +335,18 @@ impl Core {
 /// must see them too; a viewer repainted after falling behind gets the mode
 /// either way).
 pub(crate) fn first_paint(st: &State, id: u32, history: usize) -> Vec<u8> {
-    let mut paint = st.screens[&id].paint(history);
+    let screen = &st.screens[&id];
+    let mut paint = paint_state(st, id, screen.paint(history));
+    if let Some(continuation) = screen.continuation() {
+        paint.extend(continuation);
+    }
+    paint
+}
+
+fn paint_state(st: &State, id: u32, screen: Vec<u8>) -> Vec<u8> {
+    // A backlog may have ended in any parser state, not at an escape boundary.
+    let mut paint = vec![0x18];
+    paint.extend(screen);
     let t = &st.reg.terminals[&id];
     paint.extend(if t.win32_input { b"\x1b[?9001h" } else { b"\x1b[?9001l" });
     let root = t.status.iter().map(|s| ("", s));

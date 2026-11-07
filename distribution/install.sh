@@ -50,7 +50,18 @@ want=$(printf '%s' "$entry" | sed -n 's/.*"sha256":"\([^"]*\)".*/\1/p')
 version=$(printf '%s' "$flat" | sed -n 's/^{"version":"\([^"]*\)".*/\1/p')
 [ -n "$url" ] && [ -n "$want" ] || fail "no build for $target in $manifest"
 
-curl -fsSL "$url" -o "$tmp/hc.tar.gz" || fail "download failed: $url"
+# Tells the release server's download counter a new install from an update;
+# the file is the same either way. Only plain URLs on the release server in
+# use are marked: one with a query or fragment (a mirror's signed URL) is
+# fetched exactly as the manifest gives it.
+src=install
+if [ -x "$bin/herdr-core" ]; then src=update; fi
+case $url in
+  *[?#]*) download=$url ;;
+  "$releases"/*) download="$url?src=$src" ;;
+  *) download=$url ;;
+esac
+curl -fsSL "$download" -o "$tmp/hc.tar.gz" || fail "download failed: $url"
 [ "$(sha256 "$tmp/hc.tar.gz")" = "$want" ] || fail "the download is damaged (checksum mismatch); try again"
 tar -xzf "$tmp/hc.tar.gz" -C "$tmp"
 "$tmp/herdr-core" --version >/dev/null 2>&1 || fail "the downloaded hc does not run on this machine"

@@ -10,6 +10,17 @@ pub use unix::*;
 #[cfg(target_os = "linux")]
 pub mod systemd;
 
+#[cfg(target_os = "macos")]
+mod macos_shutdown;
+
+/// Keep the early shutdown watch alive for the core's lifetime.
+pub fn monitor_host_shutdown() -> impl Sized {
+    #[cfg(target_os = "macos")]
+    {
+        macos_shutdown::monitor()
+    }
+}
+
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
@@ -23,7 +34,7 @@ mod windows_env;
 #[cfg(windows)]
 mod windows_session;
 
-/// Whether Windows is ending this session, including logout.
+/// Whether the host is shutting down (Windows also includes logout).
 pub fn host_shutdown_in_progress() -> bool {
     #[cfg(windows)]
     {
@@ -31,7 +42,11 @@ pub fn host_shutdown_in_progress() -> bool {
         // Keep USER32 statically linked: first loading it during shutdown can interrupt exit recording.
         unsafe { GetSystemMetrics(SM_SHUTTINGDOWN) != 0 }
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        macos_shutdown::in_progress()
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         false
     }

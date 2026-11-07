@@ -42,12 +42,158 @@ fn a_new_holder_of_another_build_reports_both_identities() {
         io::Write::write_all(&mut holder, &proto::json_frame(proto::WELCOME, 0, &welcome)).unwrap();
         assert_eq!(proto::read(&mut holder).unwrap().unwrap().0, proto::DRAIN);
     });
-    let err = core.take_over(stream, true).unwrap_err().to_string();
+    let err = core.take_over(stream, true, &root.join("run/core.holder.x.sock"), None).unwrap_err().to_string();
     assert!(err.contains("other-build"), "{err}");
     assert!(err.contains(&crate::client::build_id()), "{err}");
     assert!(core.lock().holders.is_empty());
     fake.join().unwrap();
     core.handover(); // finish the registry write before removing its directory
+    drop(core);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// A frame no core can read: the reader of a link that gets it fails.
+#[cfg(unix)]
+const GARBAGE: [u8; 9] = [proto::OUTPUT, 1, 0, 0, 0, 0xff, 0xff, 0xff, 0xff];
+
+/// A core with one live terminal on a fake holder. Each connection's hello is
+/// answered as told ("welcome", "garbage", or both), and the fake reports
+/// what it saw: connection number, then "hello", "no hello" or "closed".
+#[cfg(unix)]
+fn on_fake_holder(root: &std::path::Path, answers: &[&str]) -> (Arc<Core>, u32, mpsc::Receiver<String>) {
+    let paths = Paths {
+        state: root.join("state"),
+        config: root.join("config.toml"),
+        socket: root.join("run/core.sock"),
+        holder_socket: root.join("run/core.holder.sock"),
+    };
+    paths.create_dirs().unwrap();
+    let core = Core::start(paths, CoreInfo { id: "test".into(), name: "test".into() }).unwrap();
+    let id = {
+        let mut st = core.lock();
+        let new = crate::terminals::NewTerminal { argv: vec!["sh".into()], ..Default::default() };
+        let id = st.reg.create(new, now_ms()).unwrap();
+        st.reg.terminals.get_mut(&id).unwrap().holder = Some("fake".into());
+        id
+    };
+    let held = proto::HeldTerminal { id, pid: 0, cols: 80, rows: 24, exit: None };
+    let welcome = proto::Welcome {
+        version: proto::VERSION,
+        instance: "fake".into(),
+        pid: 0,
+        build: crate::client::build_id(),
+        previous: "crash".into(),
+        terminals: vec![held],
+    };
+    let mut welcome = proto::json_frame(proto::WELCOME, 0, &welcome);
+    welcome.extend(proto::frame(proto::TAIL, id, b""));
+    let socket = root.join("run/core.holder.fake.sock");
+    let listener = platform::listen(&socket).unwrap();
+    let answers: Vec<Vec<u8>> = answers
+        .iter()
+        .map(|a| {
+            let mut frames = if a.contains("welcome") { welcome.clone() } else { vec![] };
+            if a.contains("garbage") {
+                frames.extend(GARBAGE);
+            }
+            frames
+        })
+        .collect();
+    let (heard, reports) = mpsc::channel();
+    std::thread::spawn(move || {
+        for (n, (stream, answer)) in listener.incoming().zip(answers).enumerate() {
+            let (mut stream, heard) = (stream.unwrap(), heard.clone());
+            std::thread::spawn(move || {
+                let Ok(Some(_)) = proto::read(&mut stream) else {
+                    return heard.send(format!("{n} no hello")).unwrap();
+                };
+                heard.send(format!("{n} hello")).unwrap();
+                std::thread::sleep(Duration::from_millis(50)); // time for the test to act, well within RELINK_WAIT
+                let _ = io::Write::write_all(&mut stream, &answer);
+                while let Ok(Some(_)) = proto::read(&mut stream) {} // the core's frames, until it closes
+                let _ = heard.send(format!("{n} closed"));
+            });
+        }
+    });
+    core.take_over(platform::connect(&socket).unwrap(), false, &socket, None).unwrap();
+    (core, id, reports)
+}
+
+#[cfg(unix)]
+fn reported(reports: &mpsc::Receiver<String>, n: usize) -> Vec<String> {
+    let mut seen: Vec<String> = (0..n).map_while(|_| reports.recv_timeout(Duration::from_secs(5)).ok()).collect();
+    seen.sort();
+    seen
+}
+
+/// Live and not ended by losing its holder: left for whoever adopts it next.
+#[cfg(unix)]
+fn still_live(core: &Core, id: u32) -> bool {
+    core.lock().reg.terminals.get(&id).is_some_and(|t| t.is_live() && t.reason.is_none())
+}
+
+#[cfg(unix)]
+#[test]
+fn a_link_whose_reading_fails_reconnects_but_not_twice_in_a_row() {
+    let root = PathBuf::from(format!("/var/tmp/hc-holder-relink-{}", platform::random_hex()));
+    let (core, id, reports) = on_fake_holder(&root, &["welcome garbage", "welcome garbage", ""]);
+    assert_eq!(
+        reported(&reports, 5),
+        ["0 closed", "0 hello", "1 closed", "1 hello", "2 no hello"],
+        "each failed link closes; the first failure reconnects, the second soon after does not"
+    );
+    assert!(core.lock().holders.is_empty());
+    assert!(still_live(&core, id));
+    drop(core);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn a_reconnect_the_holder_never_answers_gives_up_and_frees_holder_start() {
+    let root = PathBuf::from(format!("/var/tmp/hc-holder-relink-{}", platform::random_hex()));
+    let (core, id, reports) = on_fake_holder(&root, &["welcome garbage", ""]);
+    assert_eq!(reported(&reports, 4), ["0 closed", "0 hello", "1 closed", "1 hello"]);
+    let start = Instant::now();
+    while core.holder_start.try_lock().is_err() && start.elapsed() < Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(core.holder_start.try_lock().is_ok(), "runs and stops can start holders again");
+    assert!(still_live(&core, id));
+    drop(core);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn a_reconnect_whose_handshake_is_done_is_not_cut_however_slow_the_rest() {
+    let root = PathBuf::from(format!("/var/tmp/hc-holder-relink-{}", platform::random_hex()));
+    let (core, id, reports) = on_fake_holder(&root, &["welcome garbage", "welcome"]);
+    while reports.recv_timeout(Duration::from_secs(5)).unwrap() != "1 hello" {}
+    // Adopting waits for this lock: slow, but after the welcome came in time.
+    let st = core.lock();
+    std::thread::sleep(RELINK_WAIT * 3);
+    drop(st);
+    let start = Instant::now();
+    while core.lock().holders.is_empty() && start.elapsed() < Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    std::thread::sleep(RELINK_WAIT * 2);
+    assert_eq!(core.lock().holders.len(), 1, "the new link stays");
+    assert!(reports.try_iter().all(|r| r != "1 closed"), "and is not cut");
+    assert!(still_live(&core, id));
+    drop(core);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn a_reconnect_that_fails_leaves_the_holders_terminals_live() {
+    let root = PathBuf::from(format!("/var/tmp/hc-holder-relink-{}", platform::random_hex()));
+    let (core, id, reports) = on_fake_holder(&root, &["welcome garbage", "garbage"]);
+    assert_eq!(reported(&reports, 4), ["0 closed", "0 hello", "1 closed", "1 hello"]);
+    assert!(core.lock().holders.is_empty());
+    assert!(still_live(&core, id), "its holder still answers: nothing ends");
     drop(core);
     std::fs::remove_dir_all(root).unwrap();
 }
