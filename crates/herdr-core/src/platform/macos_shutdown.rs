@@ -296,6 +296,8 @@ mod tests {
             assert_eq!(st.reg.terminals[&id].is_live(), !killed);
             assert_eq!(st.reg.terminals[&id].reason.as_deref(), Some(if killed { "killed" } else { "host_shutdown" }));
         }
+        // The fork saves off-lock: a restart must read the completed write, not race it.
+        crate::runtime::flush_saves();
         drop(core);
         drop(registration);
         SHUTDOWN.get().unwrap().store(0, Ordering::Release);
@@ -303,6 +305,7 @@ mod tests {
         assert!(restarted.lock().reg.terminals[&1].is_live());
         assert!(!restarted.lock().reg.terminals[&2].is_live());
         drop(restarted);
+        crate::runtime::flush_saves();
         std::fs::remove_dir_all(root).unwrap();
     }
 }
