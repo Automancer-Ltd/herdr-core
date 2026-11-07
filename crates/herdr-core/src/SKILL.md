@@ -121,6 +121,8 @@ Use the returned address to wait/read it; don't launch a duplicate.
 Your harness's own file tools touch only the machine you run on. Use hc for
 remote files and commands. `hc machine ls` lists configured machines; see
 `hc machine --help` to configure SSH or `--via <cmd>` connections.
+Without `--name`, SSH machines use the first host label (IPs stay whole),
+shortened to 32 characters with `-2`, `-3`, etc. added if the name is taken.
 
 On Windows, `hc server status` never starts a core. If elevated SSH startup
 would block the same user's desktop session, open Herdr on that Windows
@@ -168,15 +170,28 @@ the log remains, so ownership can be read from that machine alone.
 - `blocked` means a person is needed (permission or a question): read the
   screen and ask your user. `send` refuses unless `--force`; don't use it to
   bypass a permission decision. `error`: read why, then send or kill.
+- `hc run` without a command starts this machine's own shell. On macOS,
+  this is a login shell so it loads the login environment; explicit commands
+  are unchanged. Recovery shells use the same rule.
+- `shell = ["nu"]` in `~/.config/herdr-core/config.toml` (Windows:
+  `%APPDATA%\herdr-core\config.toml`) overrides the shell for new terminals
+  and recovery. Each list item is one argument. Changes apply on the next
+  launch; running programs stay running. A missing executable reports
+  `spawn_failed`; recovery retries and logs launch errors in `holder.log`.
 - `hc keep <t>` (or `run --keep`) replaces a lost program with a shell,
   never reruns a task. `hc keep <t> --off` disables recovery. Signal death
   without an exit code is loss too. After a grace delay, recovery runs on
-  every OS. Streams end on loss; reattach after the restarted event.
-  Pending input/attach may be unavailable: retry after recovery.
+  every OS, including after a host shutdown. On macOS, shutdown warnings
+  preserve kept programs even if they catch a signal and exit with a code;
+  on Linux, systemd stops the core before its holders. Ordinary exits and
+  explicit kills remain final. Streams end on loss; reattach after the
+  restarted event. Pending input/attach may be unavailable: retry after recovery.
 - Once work is accepted: `hc kill <t>`, then `hc rm <t>`. Only clean up
   terminals you started; `hc ls` includes your user's other live work.
 - `hc update` also restarts an older running core when the installed binary
   is already current. JSON reports `restarted: true`; terminals keep running.
+  Managed installs must be updated with their package manager instead, and
+  one in a folder you can't write (Unix) the way it was installed.
 - Never `hc server stop` or restart the user's core unless asked. It affects
   every terminal. Tests need their own `HC_SESSION` and scratch XDG paths.
 - Errors are `{error: {kind, message, hint}}` on stderr. Exit codes include

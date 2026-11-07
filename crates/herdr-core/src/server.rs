@@ -54,6 +54,7 @@ pub fn serve() -> io::Result<()> {
     io::Write::write_all(&mut lock, paths.socket.as_os_str().as_encoded_bytes())?;
     let info = load_identity(&paths.state, platform::machine_id())?;
     let socket = paths.socket.clone();
+    let _shutdown_watch = platform::monitor_host_shutdown();
     // Adopt the holder's terminals before anyone can talk to us.
     let core = Core::start(paths, info)?;
     let bound = AsyncListener::bind(&socket)?;

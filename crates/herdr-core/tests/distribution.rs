@@ -114,6 +114,73 @@ fn the_install_script_installs_and_then_updates_without_stopping_anything() {
     drop(r);
 }
 
+/// The URL the install script downloads hc from, for a list giving `url`,
+/// with curl stubbed to record it (the download itself fails).
+fn install_script_downloads(s: &Session, url: &str, releases: &str, installed: bool) -> String {
+    let dir = s.root.join(format!(
+        "marker-{}",
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    let (stub, bin) = (dir.join("stub"), dir.join("bin"));
+    std::fs::create_dir_all(&stub).unwrap();
+    std::fs::create_dir_all(&bin).unwrap();
+    if installed {
+        std::fs::write(bin.join("herdr-core"), "#!/bin/sh\n").unwrap();
+        Command::new("chmod").arg("755").arg(bin.join("herdr-core")).status().unwrap();
+    }
+    let list = dir.join("latest.json");
+    std::fs::write(
+        &list,
+        format!(r#"{{"version":"1.0.0","generation":1,"targets":{{"{}":{{"url":"{url}","sha256":"x"}}}}}}"#, here()),
+    )
+    .unwrap();
+    let log = dir.join("urls");
+    std::fs::write(
+        stub.join("curl"),
+        format!(
+            "#!/bin/sh\nout=; url=; prev=\nfor a; do\n  if [ \"$prev\" = -o ]; then out=$a; else case $a in -*) ;; *) url=$a ;; esac; fi\n  prev=$a\ndone\necho \"$url\" >> {log}\ncase $url in */latest.json) cp {list} \"$out\"; exit 0 ;; esac\nexit 22\n",
+            log = log.display(),
+            list = list.display()
+        ),
+    )
+    .unwrap();
+    Command::new("chmod").arg("755").arg(stub.join("curl")).status().unwrap();
+    let out = Command::new("sh")
+        .arg(format!("{ROOT}/../../distribution/install.sh"))
+        .env("PATH", format!("{}:/usr/bin:/bin", stub.display()))
+        .env("HERDR_RELEASES_URL", releases)
+        .env("HC_INSTALL_DIR", &bin)
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("download failed"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    std::fs::read_to_string(log).unwrap().lines().last().unwrap().to_owned()
+}
+
+/// The download counter on releases.herdr.dev: plain release URLs say install
+/// or update; a mirror's query (a signed URL) or fragment, or another host,
+/// is fetched exactly as the list gives it.
+#[test]
+fn the_install_script_marks_only_plain_release_downloads() {
+    let s = Session::new();
+    let r = "https://releases.example";
+    let tarball = format!("{r}/core/1.0.0/herdr-core-{}.tar.gz", here());
+    assert_eq!(install_script_downloads(&s, &tarball, r, false), format!("{tarball}?src=install"));
+    assert_eq!(install_script_downloads(&s, &tarball, r, true), format!("{tarball}?src=update"));
+    for url in [
+        format!("{tarball}?sig=a%2Fb&exp=1"),
+        format!("{tarball}?src=install"),
+        format!("{tarball}#x"),
+        "https://mirror.example/core/1.0.0/hc.tar.gz".to_owned(),
+        "https://releases.example.evil/core/1.0.0/hc.tar.gz".to_owned(),
+    ] {
+        assert_eq!(install_script_downloads(&s, &url, r, false), url);
+    }
+}
+
 #[test]
 fn hc_update_downloads_checks_and_swaps() {
     let mut s = Session::new();

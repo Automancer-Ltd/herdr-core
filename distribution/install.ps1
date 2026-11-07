@@ -47,7 +47,14 @@ try {
     $t = $m.targets.$target
     if (-not $t.url -or -not $t.sha256) { Fail "no build for $target in $manifest" }
 
-    curl.exe -fsSL $t.url -o "$tmp\hc.zip"
+    # Tells the release server's download counter a new install from an
+    # update; the file is the same either way. Only plain URLs on the release
+    # server in use are marked: one with a query or fragment (a mirror's
+    # signed URL) is fetched exactly as the manifest gives it.
+    $src = if (Test-Path (Join-Path $dir "herdr-core.exe")) { "update" } else { "install" }
+    $plain = $t.url.StartsWith("$releases/", [StringComparison]::Ordinal) -and $t.url.IndexOfAny([char[]]"?#") -lt 0
+    $download = if ($plain) { "$($t.url)?src=$src" } else { $t.url }
+    curl.exe -fsSL $download -o "$tmp\hc.zip"
     if ($LASTEXITCODE) { Fail "download failed: $($t.url)" }
     # .NET, not Get-FileHash: that one fails when PowerShell 7 starts 5.1.
     $stream = [IO.File]::OpenRead("$tmp\hc.zip")

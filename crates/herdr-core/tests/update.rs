@@ -62,6 +62,31 @@ fn an_up_to_date_binary_restarts_only_an_older_running_core() {
 }
 
 #[test]
+fn an_install_in_a_read_only_folder_explains_how_to_update_it() {
+    use std::os::unix::fs::PermissionsExt;
+    if unsafe { libc::geteuid() } == 0 {
+        return; // Root can replace files in read-only directories.
+    }
+    let mut s = Session::new();
+    let dir = s.root.join("bin");
+    std::fs::create_dir(&dir).unwrap();
+    s.bin = dir.join("herdr-core");
+    std::fs::copy(BIN, &s.bin).unwrap();
+    s.json(&["server", "start"]);
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let status = s.cmd().args(["server", "status"]).output().unwrap();
+    let update = s.cmd().args(["update", "--from", BIN]).output().unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let status: Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(status["installed_by"], "system package manager");
+    let error: Value = serde_json::from_slice(&update.stderr).unwrap();
+    assert!(!update.status.success());
+    assert_eq!(error["error"]["kind"], "refused", "{error}");
+    assert_eq!(error["error"]["message"], format!("{} isn't writable by you", dir.canonicalize().unwrap().display()));
+    assert_eq!(error["error"]["hint"], "update herdr-core the way it was installed (package manager, or sudo)");
+}
+
+#[test]
 fn update_from_a_file_swaps_hc_and_keeps_everything_running() {
     let mut s = Session::new();
     let dir = s.root.join("bin");

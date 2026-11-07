@@ -283,10 +283,10 @@ jobs:
           version: 0.16.0
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          key: x86_64-unknown-linux-musl-dev # the test job's build
+          key: linux-upgrade-dev # upgrade builds native GNU, not musl
           cache-workspace-crates: true
           cache-bin: false
-          save-if: false
+          save-if: ${{ github.event_name == 'workflow_dispatch' }}
       - name: The last release
         id: last
         run: |

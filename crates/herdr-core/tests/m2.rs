@@ -124,6 +124,43 @@ fn queries_are_answered_once_by_the_core_with_the_viewers_colors() {
 }
 
 #[test]
+fn display_changes_notify_an_idle_subscribed_program() {
+    let s = Session::new();
+    let received = s.root.join("replies");
+    let probe = script(
+        &s,
+        &format!(
+            "w go; stty raw -echo; (w query; printf '\\033]10;?\\007\\033]11;?\\007\\033[?996n') & \
+             printf '\\033[?2031h'; echo READY; cat > {}",
+            received.display()
+        ),
+    );
+    let t = run(&s, &["sh", "-c", &probe]);
+    let mut v = Viewer::attach(&s, &t, 80, 24, json!({"display": {"fg": "#eeeeee", "bg": "#000000", "cell": [9, 18]}}));
+    go(&s);
+    v.shows("READY");
+    let replies = || std::fs::read(&received).unwrap_or_default();
+    // Do not print anything from the program to flush the notification.
+    v.conn.send(v.channel, wire::FACTS, br##"{"fg":"#010203","bg":"#ffffff"}"##);
+    wait_until("light notification at the PTY", || replies() == b"\x1b[?997;2n");
+    v.conn.send(v.channel, wire::FACTS, br##"{"bg":"#000000"}"##);
+    wait_until("dark notification at the PTY", || replies() == b"\x1b[?997;2n\x1b[?997;1n");
+
+    v.conn.send(v.channel, wire::FACTS, br##"{"bg":"#000000"}"##);
+    v.conn.send(v.channel, wire::FACTS, b"{}");
+    v.conn.call("terminal.get", json!({"terminal": t}));
+
+    // Omitted foreground facts survive both the update and a leadership change.
+    let other = Viewer::attach(&s, &t, 80, 24, json!({"display": {"fg": "#abcdef"}}));
+    v.conn.send(v.channel, wire::FOCUS, &[1]);
+    v.conn.call("terminal.get", json!({"terminal": t}));
+    touch(&s, "query");
+    let expected = b"\x1b[?997;2n\x1b[?997;1n\x1b[?997;1n\x1b[?997;1n\x1b]10;rgb:0101/0202/0303\x07\x1b]11;rgb:0000/0000/0000\x07\x1b[?997;1n";
+    wait_until("queries answered at the PTY without extra notifications", || replies() == expected);
+    drop(other);
+}
+
+#[test]
 fn in_band_resize_reports_belong_to_the_viewer_not_the_core() {
     let s = Session::new();
     let probe = script(
@@ -168,6 +205,22 @@ fn size_follows_the_last_active_typing_viewer() {
 }
 
 #[test]
+fn display_facts_do_not_take_size_leadership_from_an_active_viewer() {
+    let s = Session::new();
+    let t = run(&s, &["sleep", "100"]);
+    let mut a = Viewer::attach(&s, &t, 100, 30, json!({}));
+    let mut b = Viewer::attach(&s, &t, 80, 24, json!({}));
+    b.typed(b"typing");
+    b.conn.call("terminal.get", json!({"terminal": t}));
+    assert_eq!(size(&s, &t), (80, 24));
+
+    a.conn.send(a.channel, wire::FACTS, br##"{"bg":"#ffffff"}"##);
+    let record = a.conn.call("terminal.get", json!({"terminal": t}));
+    assert_eq!((record["result"]["cols"].as_u64(), record["result"]["rows"].as_u64()), (Some(80), Some(24)));
+    assert_eq!(size(&s, &t), (80, 24));
+}
+
+#[test]
 fn a_stalled_viewer_blocks_nobody_and_catches_up_with_a_repaint() {
     let s = Session::new();
     let flood = after_go(&s, "head -c 8000000 /dev/zero | tr '\\0' x; echo; echo DONE; sleep 100");
@@ -191,6 +244,64 @@ fn a_stalled_viewer_blocks_nobody_and_catches_up_with_a_repaint() {
     stalled.conn.send(stalled.channel, wire::CREDIT, &(64u32 << 20).to_le_bytes());
     stalled.shows("DONE");
     assert!(stalled.received < 6 << 20, "replayed the whole backlog: {} bytes", stalled.received);
+}
+
+#[test]
+fn a_stalled_viewer_never_prints_the_tail_of_dropped_image_data() {
+    let s = Session::new();
+    let flood = after_go(
+        &s,
+        "printf 'before\\r\\n\\033_Gm=1;'; head -c 8000000 /dev/zero | tr '\\0' A; \
+         printf '\\033\\\\\\r\\nafter\\r\\n'; sleep 100",
+    );
+    let t = run(&s, &["sh", "-c", &flood]);
+    let mut stalled = Viewer::attach(&s, &t, 80, 24, json!({}));
+    stalled.credit = false;
+    let mut live = Viewer::attach(&s, &t, 80, 24, json!({"observe": true}));
+    go(&s);
+    live.shows("after");
+    stalled.drain(Duration::from_millis(100));
+    stalled.credit = true;
+    stalled.conn.send(stalled.channel, wire::CREDIT, &(64u32 << 20).to_le_bytes());
+    stalled.shows("after");
+    for viewer in [&live, &stalled] {
+        let text = viewer.text();
+        assert!(!text.contains("AAAA"), "image payload leaked: {text:?}");
+    }
+}
+
+#[test]
+fn attaching_and_resizing_mid_image_never_turns_its_tail_into_text() {
+    for bytes in [4000, 100_000] {
+        let s = Session::new();
+        let ready = s.root.join("ready");
+        let finish = s.root.join("finish");
+        let program = after_go(
+            &s,
+            &format!(
+                "printf 'before\\r\\n\\033_Gm=1;'; head -c {bytes} /dev/zero | tr '\\0' A; \
+             touch {}; while [ ! -e {} ]; do sleep 0.02; done; \
+             printf 'AAAAAAAA\\033\\\\\\r\\nafter\\r\\n'; sleep 100",
+                ready.display(),
+                finish.display()
+            ),
+        );
+        let t = run(&s, &["sh", "-c", &program]);
+        let mut original = Viewer::attach(&s, &t, 80, 24, json!({}));
+        go(&s);
+        wait_until("image prefix written", || ready.exists());
+        original.drain(Duration::from_millis(100));
+        let mut late = Viewer::attach(&s, &t, 80, 24, json!({}));
+        late.shows("before");
+        late.conn.send(late.channel, wire::RESIZE, &[90, 0, 25, 0]);
+        std::fs::write(&finish, "").unwrap();
+        late.shows("after");
+        original.shows("after");
+        for viewer in [&original, &late] {
+            let text = viewer.text();
+            assert!(!text.contains("AAAA"), "image payload leaked after attach/resize: {text:?}");
+        }
+    }
 }
 
 #[test]

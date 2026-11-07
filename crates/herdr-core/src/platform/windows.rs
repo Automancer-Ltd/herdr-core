@@ -373,6 +373,10 @@ pub fn try_lock(file: &File) -> bool {
     }
 }
 
+pub fn can_replace(_: &Path) -> bool {
+    true
+}
+
 pub fn make_executable(_: &Path) -> io::Result<()> {
     Ok(())
 }

@@ -63,6 +63,9 @@ fn lost_kept_terminal_restarts_in_place_in_its_last_folder() {
 fn kept_terminal_survives_core_crash_and_recovers_if_its_holder_is_also_lost() {
     let s = Session::new();
     let t = run(&s, &["--keep", "sleep", "100"]);
+    let config = s.root.join("config/herdr-core/config.toml");
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    std::fs::write(&config, r#"shell = ["/bin/sh", "-c", "echo configured-restore; exec /bin/sh"]"#).unwrap();
     let old = get(&s, &t)["pid"].as_i64().unwrap();
     s.wait_saved_terminal(old);
     let status = s.json(&["server", "status"]);
@@ -79,6 +82,7 @@ fn kept_terminal_survives_core_crash_and_recovers_if_its_holder_is_also_lost() {
     wait_until("core gone again", || !s.connect_ok());
     wait_until("replacement on start", || get(&s, &t)["pid"].as_i64().is_some_and(|p| p != old));
     assert_eq!(get(&s, &t)["state"], "live");
+    wait_until("configured restored shell", || text(&s, &t).contains("configured-restore"));
     assert!(!pid_alive(old));
 }
 
@@ -95,7 +99,8 @@ fn failed_shell_restart_stays_live_and_retries() {
     assert!(r["finished_ms"].is_null());
     std::fs::write(&shell, "#!/bin/sh\nexec /bin/sh\n").unwrap();
     std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o700)).unwrap();
-    wait_until("retry succeeds", || get(&s, &t)["pid"].is_number());
+    // Failed attempts back off for 1.5, 3, then 6 seconds: already longer than wait_until allows.
+    wait_until_for("retry succeeds", std::time::Duration::from_secs(30), || get(&s, &t)["pid"].is_number());
     assert_eq!(s.json(&["ls"])["terminals"].as_array().unwrap().len(), 1);
     let r = get(&s, &t);
     assert!(r["reason"].is_null());
@@ -348,6 +353,16 @@ fn late_initial_spawn_failure_is_handled_after_timeout_even_after_keep_off() {
         });
         assert_eq!(get(&s, "t2")["keep"], keep);
     }
+}
+
+#[test]
+fn ordinary_exit_stays_finished_across_a_core_restart_in_the_same_boot() {
+    let s = Session::new();
+    let t = run(&s, &["--keep", "sh", "-c", "exit 1"]);
+    wait_until("ordinary exit", || get(&s, &t)["state"] == "finished");
+    s.json(&["server", "stop"]);
+    assert_eq!(get(&s, &t)["state"], "finished");
+    assert_eq!(get(&s, &t)["exit_code"], 1);
 }
 
 #[test]

@@ -141,8 +141,9 @@ pub struct StatusResult {
     pub holders: Vec<HolderInfo>,
     pub live: usize,
     pub finished: usize,
-    /// The package manager this hc came from (homebrew, nix, mise): it
-    /// updates hc, `hc update` won't. Null for a plain install.
+    /// The package manager this hc came from (homebrew, nix, mise, or
+    /// system package manager): it updates hc, `hc update` won't.
+    /// Null for a replaceable plain install.
     pub installed_by: Option<String>,
     /// Execs running now and the most allowed at once (`machine.exec` beyond that is refused as unavailable).
     pub execs_running: usize,

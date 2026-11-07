@@ -126,7 +126,8 @@ fn two_machines_that_added_each_other_never_echo_events_back() {
     });
     let mut c = s.connect();
     c.call(1, "events.subscribe", json!({}));
-    c.call(2, "doc.set", json!({"name": "app", "value": 1, "version": 0}));
+    // A plain subscription only receives events; make changes on a separate connection.
+    s.connect().call(2, "doc.set", json!({"name": "app", "value": 1, "version": 0}));
     // Two sleeping terminals and one document change: a handful of events, not a storm.
     c.reader.get_ref().set_read_timeout(Some(std::time::Duration::from_millis(100))).unwrap();
     let (started, mut events) = (std::time::Instant::now(), 0);
@@ -312,7 +313,11 @@ fn a_shell_or_a_shell_line_there_uses_that_machines_own_shell() {
 
     let t = conn.call(1, "terminal.run", json!({"on": "rohan"}))["result"]["address"].as_str().unwrap().to_string();
     wait_until("its shell", || text(&s, &t).contains("rohans own shell"));
-    assert_eq!(get(&s, &t)["argv"], json!([shell]));
+    let mut own = vec![shell.display().to_string()];
+    if cfg!(target_os = "macos") {
+        own.push("-l".into()); // macOS starts its own shells as login shells
+    }
+    assert_eq!(get(&s, &t)["argv"], json!(own));
 
     let line = "echo $((6 * 7))";
     let r = conn.call(2, "terminal.run", json!({"on": "rohan", "line": line, "wait": true}))["result"].clone();
