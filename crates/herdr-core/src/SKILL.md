@@ -249,7 +249,9 @@ paths start at your current folder. Prefer explicit paths for remote work.
   bundled remote core: run `hc update` there instead. Root remotes receive the
   standalone release.
 - On macOS, desktop starts use a one-shot launchd job so quitting the launching
-  app doesn't end terminals. SSH starts stay direct. If launchd fails, startup
+  app doesn't end terminals. SSH starts use it too when the user has a GUI login
+  session, so terminals get that session's keychain and privacy context; without
+  one they stay direct. If launchd fails, startup
   falls back to a direct child and logs the reason in `core.log`; that core may
   end with its launching app.
 - Updates and `hc server restart` keep the environment the core started with;
